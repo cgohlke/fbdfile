@@ -12,7 +12,8 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.16
+:Version: 2025.9.17
+:DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
 ----------
@@ -43,6 +44,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.9.17
+
+- Make frame_markers a numpy array.
+- Add options to specify number of OpenMP threads.
 
 2025.9.16
 
