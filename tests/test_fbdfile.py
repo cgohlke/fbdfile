@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2025.9.16
+:Version: 2025.9.17
 
 """
 
@@ -77,16 +77,22 @@ def test_version():
 
 def test_fbd_error():
     """Test FbdFile errors."""
+    fname = DATA / 'flimbox.fbf'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
     with pytest.raises(FileNotFoundError):
         FbdFile('nonexistingfile.fbd')
     with pytest.raises(ValueError):
-        FbdFile(DATA / 'flimbox.fbf')
+        FbdFile(fname)
 
 
 def test_fbd_cbco_b2w8c2():
     """Test read CBCO b2w8c2 FBD file."""
     # SimFCS 16-bit with code settings; does not correctly decode image
     fname = DATA / 'flimbox$CBCO.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with FbdFile(fname) as fbd:
         assert str(fbd).startswith("<FbdFile 'flimbox$CBCO.fbd'>")
@@ -141,7 +147,7 @@ def test_fbd_cbco_b2w8c2():
             )
 
         assert shape == (256, 266)
-        assert frame_markers == [(44097, 124814)]
+        assert frame_markers.tolist() == [[44097, 124814]]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -163,6 +169,8 @@ def test_fbd_cfco_b2w8c2():
     """Test read CFCO b2w8c2 FBD file."""
     # SimFCS 16-bit with correct code settings
     fname = DATA / 'CeruleanVenusCell1$CFCO.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with FbdFile(fname) as fbd:
         assert str(fbd).startswith("<FbdFile 'CeruleanVenusCell1$CFCO.fbd'>")
@@ -214,7 +222,7 @@ def test_fbd_cfco_b2w8c2():
         )
 
         assert shape == (256, 312)
-        assert frame_markers[0] == (192126, 529435)
+        assert frame_markers[0].tolist() == [192126, 529435]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -236,6 +244,8 @@ def test_fbd_xx2x_b4w16c4t10():
     """Test read XX2X b4w16c4t10 FBD file."""
     # ISS VistaVision 32-bit with external fbs.xml settings
     fname = DATA / 'IFLItest/303 Cu6 vs FL$XX2X.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with FbdFile(fname) as fbd:
         assert str(fbd).startswith("<FbdFile '303 Cu6 vs FL$XX2X.fbd'>")
@@ -287,8 +297,8 @@ def test_fbd_xx2x_b4w16c4t10():
         )
         assert shape == (256, 291)
         assert len(frame_markers) == 38
-        assert frame_markers[0] == (4753, 78205)
-        assert frame_markers[-1] == (2582185, 2635055)
+        assert frame_markers[0].tolist() == [4753, 78205]
+        assert frame_markers[-1].tolist() == [2582185, 2635055]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -322,6 +332,8 @@ def test_fbd_xx2x_b4w16c4():
     # ISS VistaVision 32-bit with external fbs.xml settings
     # https://github.com/cgohlke/lfdfiles/issues/1
     fname = DATA / 'b4w16c4/E5+17+32M-20MHz-cell1$XX2X.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with FbdFile(fname) as fbd:
         assert str(fbd).startswith(
@@ -351,7 +363,7 @@ def test_fbd_xx2x_b4w16c4():
         assert fbd.synthesizer == 'Unknown'
         assert fbd.is_32bit
 
-        bins, times, markers = fbd.decode()
+        bins, times, markers = fbd.decode(num_threads=6)
 
         assert bins.shape == (4, 3907584)
         assert bins.dtype == numpy.int8
@@ -375,14 +387,15 @@ def test_fbd_xx2x_b4w16c4():
         )
         assert shape == (257, 313)
         assert len(frame_markers) == 20
-        assert frame_markers[0] == (18027, 203143)
-        assert frame_markers[-1] == (3543838, 3728760)
+        assert frame_markers[0].tolist() == [18027, 203143]
+        assert frame_markers[-1].tolist() == [3543838, 3728760]
 
         image = fbd.asimage(
             (bins, times, markers),
             (shape, frame_markers),
             integrate_frames=0,
             square_frame=True,
+            num_threads=6,
         )
         assert image.shape == (20, 4, 256, 256, 64)
         assert image.dtype == numpy.uint16
@@ -401,6 +414,8 @@ def test_fbd_ei0t_b4w8c4():
         DATA
         / 'PhasorPy/60xw850fov48p30_cell3_nucb_mitogr_actinor_40f000$ei0t.fbd'
     )
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with FbdFile(fname, pixel_dwell_time=20.0) as fbd:
         assert str(fbd).startswith(
@@ -455,7 +470,7 @@ def test_fbd_ei0t_b4w8c4():
         )
         assert shape == (256, 404)
         assert len(frame_markers) == 40
-        assert frame_markers[0] == (37521, 207501)
+        assert frame_markers[0].tolist() == [37521, 207501]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -480,6 +495,8 @@ def test_fbd_ei0t_b4w8c4():
 def test_fbd_bytesio():
     """Test read FBD from BytesIO."""
     fname = DATA / 'CeruleanVenusCell1$CFCO.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     with open(fname, 'rb') as fh:
         data = io.BytesIO(fh.read())
@@ -526,6 +543,9 @@ def test_fbd_bytesio():
 def test_read_fbf(bytesio):
     """Test read FBF file."""
     fname = DATA / 'flimbox.fbf'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
     if bytesio:
         with open(fname, 'rb') as fh:
             data = io.BytesIO(fh.read())
@@ -550,6 +570,9 @@ def test_read_fbf(bytesio):
 def test_read_fbs(stringio):
     """Test read FBS file."""
     fname = DATA / 'FBS/TESTFILE.fbs.xml'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
     if stringio:
         with open(fname, encoding='utf-8') as fh:
             data = io.StringIO(fh.read())
@@ -576,6 +599,8 @@ def test_read_fbs(stringio):
 def test_sflim_decode():
     """Test sflim_decode and sflim_decode_photons functions."""
     fname = DATA / '20210123488_100x_NSC_166_TMRM_4_zoom4000_L115.bin'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     data = numpy.fromfile(fname, dtype=numpy.uint32)
     frequency = 78e6
@@ -585,7 +610,7 @@ def test_sflim_decode():
         dwelltime * 256 / 255 * frequency_factor * frequency
     )
     sflim = numpy.zeros((32, 256, 256, 342), dtype=numpy.uint8)
-    sflim_decode(data, sflim, pixeltime=pixeltime, maxframes=20, numthreads=6)
+    sflim_decode(data, sflim, pixeltime=pixeltime, maxframes=20, num_threads=6)
     argmax = numpy.unravel_index(numpy.argmax(sflim), sflim.shape)
     assert_array_equal(argmax, (24, 178, 132, 248))
 
@@ -602,6 +627,8 @@ def test_sflim_decode():
 def test_fbd_to_b64():
     """Test fbd_to_b64 function."""
     fname = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
 
     fbd_to_b64(
         fname,
