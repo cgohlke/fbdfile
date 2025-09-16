@@ -39,7 +39,8 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.16
+:Version: 2025.9.17
+:DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
 ----------
@@ -70,6 +71,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.9.17
+
+- Make frame_markers a numpy array.
+- Add options to specify number of OpenMP threads.
 
 2025.9.16
 
@@ -123,7 +129,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.9.16'
+__version__ = '2025.9.17'
 
 __all__ = [
     '__version__',
@@ -1191,6 +1197,7 @@ class FbdFile:
         word_count: int = -1,
         skip_words: int = 0,
         max_markers: int = 65536,
+        num_threads: int = 0,
         **kwargs: Any,
     ) -> tuple[
         NDArray[numpy.int8 | numpy.int16],
@@ -1209,6 +1216,8 @@ class FbdFile:
                 Number of data words to skip at beginning of stream.
             max_markers:
                 Maximum number of markers expected in data stream.
+            num_threads:
+                Number of OpenMP threads to use for parallelization.
 
         Returns:
             bins:
@@ -1256,6 +1265,7 @@ class FbdFile:
             self.windows,
             self.pdiv,
             self.harmonics,
+            num_threads=num_threads,
             **self.decoder_settings,
         )
 
@@ -1276,7 +1286,7 @@ class FbdFile:
         aspect_range: tuple[float, float] = (0.8, 1.2),
         frame_cluster: int = 0,
         **kwargs: Any,
-    ) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+    ) -> tuple[tuple[int, int], NDArray[Any]]:
         """Return shape and start/stop indices of scanner frames.
 
         If unable to detect any frames using the default settings, try to
@@ -1372,16 +1382,20 @@ class FbdFile:
         frame_markers = frame_markers[select_frames]
         if not frame_markers:
             raise ValueError('no frames selected')
-        return (line_num, self.scanner_line_length), frame_markers
+        return (
+            (line_num, self.scanner_line_length),
+            numpy.asarray(frame_markers, dtype=numpy.intp),
+        )
 
     def asimage(
         self,
         records: tuple[NDArray[Any], NDArray[Any], NDArray[Any]] | None = None,
-        frames: tuple[tuple[int, int], list[tuple[int, int]]] | None = None,
+        frames: tuple[tuple[int, int], NDArray[Any]] | None = None,
         /,
         *,
         integrate_frames: int = 1,
         square_frame: bool = True,
+        num_threads: int = 0,
         **kwargs: Any,
     ) -> NDArray[numpy.uint16]:
         """Return image histograms from decoded records and detected frames.
@@ -1403,6 +1417,8 @@ class FbdFile:
             square_frame:
                 If True, return square image (frame_size x frame_size),
                 else return full scanner frame.
+            num_threads:
+                Number of OpenMP threads to use for parallelization.
             **kwargs:
                 Additional arguments passed to :py:meth:`FbdFile.decode` and
                 :py:meth:`FbdFile.frames`.
@@ -1416,7 +1432,7 @@ class FbdFile:
             kwargs, 'select_frames', 'aspect_range', 'frame_cluster'
         )
         if records is None:
-            records = self.decode(**kwargs)
+            records = self.decode(num_threads=num_threads, **kwargs)
         bins, times, markers = records
         if frames is None:
             frames = self.frames(records, **kwargs_frames)
@@ -1439,6 +1455,7 @@ class FbdFile:
             self.units_per_sample,
             self.scanner_frame_start,
             result,
+            num_threads,
         )
         # reshape frames and slice valid region
         result = result.reshape(shape[:2] + scanner_shape + shape[-1:])
