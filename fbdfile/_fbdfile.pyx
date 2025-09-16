@@ -78,6 +78,7 @@ def fbd_decode(
     const data_t win_mask,
     const uint32_t win_shr,
     const bint swap_words = False,
+    const int num_threads=1,
 ):
     """Decode FLIMbox data stream.
 
@@ -124,6 +125,8 @@ def fbd_decode(
             Number of bits to right shift masked index into `decoder_table`.
         swap_words (bool):
             Swap words of uint32 data.
+        num_threads (int):
+            Number of OpenMP threads to use for parallelization.
 
     """
     cdef:
@@ -148,23 +151,24 @@ def fbd_decode(
         raise ValueError(f'cannot swap words of {data.itemsize=}')
 
     # calculate cross correlation phase index
-    for c in prange(nchannel, nogil=True):
-        for i in range(datasize):
-            d = data[i]
-            if swap_words:
-                d = (d >> 16) | (d << 16)
-            pcc = <int>((d & pcc_mask) >> pcc_shr)
-            win = <int>((d & win_mask) >> win_shr)
-            if win < maxwindex:
-                win = <int>(decoder_table[c, win])
-                if win >= 0:
-                    bins_out[c, i] = <bins_t>(
-                        (pmax-1 - (pcc + win * pmax_win) % pmax) // pdiv
-                    )
+    with nogil, parallel(num_threads=num_threads):
+        for c in prange(nchannel):
+            for i in range(datasize):
+                d = data[i]
+                if swap_words:
+                    d = (d >> 16) | (d << 16)
+                pcc = <int>((d & pcc_mask) >> pcc_shr)
+                win = <int>((d & win_mask) >> win_shr)
+                if win < maxwindex:
+                    win = <int>(decoder_table[c, win])
+                    if win >= 0:
+                        bins_out[c, i] = <bins_t>(
+                            (pmax-1 - (pcc + win * pmax_win) % pmax) // pdiv
+                        )
+                    else:
+                        bins_out[c, i] = -1  # no event
                 else:
-                    bins_out[c, i] = -1  # no event
-            else:
-                bins_out[c, i] = -2  # should never happen
+                    bins_out[c, i] = -2  # should never happen
 
     # record up-markers and absolute time
     tcc_max = (tcc_mask >> tcc_shr) + 1
@@ -201,10 +205,11 @@ def fbd_decode(
 def fbd_histogram(
     const bins_t[:, ::1] bins,
     const times_t[::1] times,
-    frame_markers,
+    const ssize_t[:, ::1] frame_markers,
     const double units_per_sample,
     const double scanner_frame_start,
-    uint16_t[:, :, :, ::1] hist_out
+    uint16_t[:, :, :, ::1] hist_out,
+    const int num_threads=1,
 ):
     """Calculate histograms from decoded FLIMbox data and frame markers.
 
@@ -216,7 +221,7 @@ def fbd_histogram(
         times (numpy.ndarray):
             Times in FLIMbox counter units at each data point.
             An `uint64` or `uint32` array of length `data.size`.
-        frame_markers (list[tuple[int, int]]):
+        frame_markers (numpy.ndarray):
             Start and stop indices of detected image frames.
         units_per_sample (float):
             Number of FLIMbox units per scanner sample.
@@ -226,12 +231,15 @@ def fbd_histogram(
             Initialized `uint16` array of shape `(number of frames, channels,
             detected line numbers, frame_size, histogram bins)`,
             where computed histogram will be stored.
+        num_threads (int):
+            Number of OpenMP threads to use for parallelization.
 
     """
     cdef:
         ssize_t nframes = hist_out.shape[0]
         ssize_t nchannels = hist_out.shape[1]
         ssize_t framelen = hist_out.shape[2]
+        ssize_t nmarkers = frame_markers.shape[0]
         # ssize_t nwindows = hist_out.shape[3]
         ssize_t i, j, k, f, c, idx
         times_t t0
@@ -241,20 +249,25 @@ def fbd_histogram(
         raise ValueError('shape mismatch between bins and hist_out')
     if bins.shape[1] != times.shape[0]:
         raise ValueError('shape mismatch between bins and times')
+    if frame_markers.shape[1] != 2:
+        raise ValueError(f'{frame_markers.shape[1]=} != 2')
 
-    for f, (j, k) in enumerate(frame_markers):
-        f = f % nframes
-        t0 = times[j]
-        for c in prange(nchannels, nogil=True):
-            for i in range(j, k):
-                idx = <ssize_t>(
-                    <double>(times[i] - t0) / units_per_sample
-                    - scanner_frame_start
-                )
-                if idx >= 0 and idx < framelen:
-                    w = bins[c, i]
-                    if w >= 0:
-                        hist_out[f, c, idx, w] += 1
+    with nogil, parallel(num_threads=num_threads):
+        for f in range(nmarkers):
+            j = frame_markers[f, 0]
+            k = frame_markers[f, 1]
+            f = f % nframes
+            t0 = times[j]
+            for c in prange(nchannels):
+                for i in range(j, k):
+                    idx = <ssize_t>(
+                        <double>(times[i] - t0) / units_per_sample
+                        - scanner_frame_start
+                    )
+                    if idx >= 0 and idx < framelen:
+                        w = bins[c, i]
+                        if w >= 0:
+                            hist_out[f, c, idx, w] += 1
 
 
 cdef:
@@ -289,7 +302,7 @@ def sflim_decode(
     const uint64_t pixeltime,
     uint64_t enabletime=0,
     const ssize_t maxframes=-1,
-    const int numthreads=1
+    const int num_threads=1
 ):
     """Decode Kintex FLIMbox data to SLIM image array.
 
@@ -308,8 +321,8 @@ def sflim_decode(
             detecting next enable bit.
         maxframes (int):
             Maximum number of image frames to decode.
-        numthreads (int):
-            Number of OpenMP threads to use for decoding addresses in parallel.
+        num_threads (int):
+            Number of OpenMP threads to use for parallelization.
 
     Examples:
         >>> import numpy, math
@@ -325,7 +338,7 @@ def sflim_decode(
         ... )
         >>> sflim = numpy.zeros((32, 256, 256, 342), dtype=numpy.uint8)
         >>> sflim_decode(
-        ...     data, sflim, pixeltime=pixeltime, maxframes=20, numthreads=6
+        ...     data, sflim, pixeltime=pixeltime, maxframes=20, num_threads=6
         ... )
         >>> numpy.unravel_index(numpy.argmax(sflim), sflim.shape)
         (np.int64(24), np.int64(178), np.int64(132), np.int64(248))
@@ -350,7 +363,7 @@ def sflim_decode(
     openmp.omp_init_lock(&lock)
 
     try:
-        with nogil, parallel(num_threads=numthreads):
+        with nogil, parallel(num_threads=num_threads):
             for address in prange(8):
                 ret = _decode_address(
                     address,
