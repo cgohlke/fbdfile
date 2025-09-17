@@ -88,6 +88,8 @@ if 'sdist' in sys.argv:
     #     fh.write(revisions.strip())
     #     fh.write(old)
 
+include_dirs = [numpy.get_include()]
+
 if DEBUG:
     extra_compile_args = ['/Zi', '/Od']
     extra_link_args = ['-debug:full']
@@ -95,9 +97,16 @@ elif sys.platform == 'win32':
     extra_compile_args = ['/openmp']
     extra_link_args = []
 elif sys.platform == 'darwin':
-    # https://mac.r-project.org/openmp/
-    extra_compile_args = ['-Xclang', '-fopenmp']
-    extra_link_args = ['-lomp']
+    if os.environ.get('CONDA_BUILD', ''):
+        # use conda-forge llvm-openmp
+        extra_compile_args = ['-Xclang', '-fopenmp']
+        extra_link_args = ['-lomp']
+    else:
+        # disable OpenMP in wheels for macOS
+        # workaround at https://mac.r-project.org/openmp/ is not stable
+        extra_compile_args = []
+        extra_link_args = []
+        include_dirs.append('.')  # use empty omp.h
 else:
     extra_compile_args = ['-fopenmp']
     extra_link_args = ['-fopenmp']
@@ -114,7 +123,7 @@ ext_modules = [
         ],
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
-        include_dirs=[numpy.get_include()],
+        include_dirs=include_dirs,
     ),
 ]
 
