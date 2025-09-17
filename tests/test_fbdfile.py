@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2025.9.17
+:Version: 2025.9.18
 
 """
 
@@ -43,9 +43,7 @@ import sysconfig
 import numpy
 import pytest
 from lfdfiles import SimfcsB64
-from matplotlib import pyplot
 from numpy.testing import assert_almost_equal, assert_array_equal
-from tifffile import imshow
 
 import fbdfile
 from fbdfile import (
@@ -65,6 +63,23 @@ from fbdfile.fbdfile import xml2dict
 HERE = pathlib.Path(os.path.dirname(__file__))
 DATA = HERE / 'data'
 SHOW = False
+
+try:
+    from matplotlib import pyplot
+    from tifffile import imshow
+except ImportError:
+    imshow = None  # type: ignore[assignment]
+    SHOW = False
+
+try:
+    import lfdfiles
+except ImportError:
+    lfdfiles = None  # type: ignore[assignment]
+
+try:
+    import phasorpy
+except ImportError:
+    phasorpy = None  # type: ignore[assignment]
 
 
 @pytest.mark.skipif(__doc__ is None, reason='__doc__ is None')
@@ -685,8 +700,98 @@ def test_xml2dict():
     assert d['floats'] == '1.0, -2.0'
 
 
+@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
+def test_lfdfiles_fbd():
+    """Test lfdfiles.FlimboxFbd class."""
+    from lfdfiles import FlimboxFbd
+
+    fname = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
+    with FlimboxFbd(fname, laser_factor=0.99168) as fbd:
+        str(fbd)
+        assert fbd.decoder == '_b2w4c2'
+        assert fbd.laser_factor == 0.99168
+        assert fbd.laser_frequency == 40000000.0
+        assert fbd.pixel_dwell_time == 25.21
+        assert fbd.header['laser_factor'] == 0.9955791
+
+        bins, times, markers = fbd.decode()
+        assert bins.shape == (2, 8380418)
+        assert times.shape == (8380418,)
+        assert markers.shape == (26,)
+
+        bins = fbd.asarray()
+        assert bins.shape == (2, 8380418)
+        assert bins.dtype == numpy.int8
+        assert bins.sum(dtype=numpy.uint32) == 117398019
+
+        image = fbd.asimage((bins, times, markers), None)
+        assert image.shape == (1, 2, 256, 256, 64)
+        assert image.dtype == numpy.uint16
+        assert image.sum(dtype=numpy.uint64) == 4287217
+
+        with pytest.raises(AttributeError):
+            fbd.non_existant
+
+        if SHOW:
+            fbd.show(cmap='turbo')
+
+
+@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
+def test_lfdfiles_fbf():
+    """Test lfdfiles.FlimboxFbf class."""
+    from lfdfiles import FlimboxFbf
+
+    fname = DATA / 'flimbox.fbf'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
+    with FlimboxFbf(fname, firmware=True) as fbf:
+        assert fbf['extclk']
+        assert fbf['channels'] == 2
+        assert fbf['windows'] == 16
+        assert fbf['clkout'] == 10000000
+        assert fbf['synchout'] == 10000000
+        assert fbf['decoder'] == '16w2'
+        assert fbf['fifofeedback'] == 0
+        assert fbf['secondharmonic'] == 0
+        assert fbf['optimalclk'] == 10000000
+        assert fbf['comment'].startswith('Version 1.1.0 added channel')
+        assert fbf.firmware()[:4] == b'(\xecXP'
+
+
+@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
+def test_lfdfiles_fbs():
+    """Test lfdfiles.FlimboxFbs class."""
+    from lfdfiles import FlimboxFbs
+
+    fname = DATA / 'FBS/TESTFILE.fbs.xml'
+    if not os.path.exists(fname):
+        pytest.skip(f'{fname!r} not found')
+
+    with FlimboxFbs(fname) as fbs:
+        str(fbs)
+        assert fbs['Comments'].startswith(
+            'File created by ISS Vista software (Version: 4.2.597.0)'
+        )
+        assert fbs['DateTimeStamp'] == '2025-02-05T18:32:36.7762228-06:00'
+        assert fbs['FirmwareParams']['ChannelMapping'] == (0, 1)
+        assert fbs['FirmwareParams']['DecoderName'] == '8w'
+        assert fbs['FirmwareParams']['Windows'] == 8
+        assert fbs['FirmwareParams']['Use2ndHarmonic'] is False
+        assert fbs['ScanParams']['Channels'] == 2
+        assert fbs['ScanParams']['ExcitationFrequency'] == 40023631
+        assert fbs['ScanParams']['FrameRepeat'] == 10
+        assert fbs['SystemSettings']['fromComments'].startswith(
+            '[Excitation Laser]\n'
+        )
+
+
+@pytest.mark.skipif(phasorpy is None, reason='phasorpy not installed')
 def test_phasorpy():
-    """Test read FLIMbox FBD file via PhasorPy."""
+    """Test phasorpy.io.signal_from_fbd function."""
     from phasorpy.datasets import fetch
     from phasorpy.io import signal_from_fbd
 
