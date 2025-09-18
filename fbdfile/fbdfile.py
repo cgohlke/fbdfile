@@ -29,7 +29,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read FLIMbox data and related files (FBD, FBF, FBS.XML).
+"""Read FLIMbox data and related files (FBD, FBF, and FBS.XML).
 
 Fbdfile is a Python library to read FLIMbox data (FBD), firmware (FBF), and
 setting (FBS.XML) files. The FLIMbox is an FPGA-based device for high
@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.17
+:Version: 2025.9.18
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -71,6 +71,10 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.9.18
+
+- Fix reading FBF and FBS files from streams.
 
 2025.9.17
 
@@ -129,7 +133,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.9.17'
+__version__ = '2025.9.18'
 
 __all__ = [
     '__version__',
@@ -1591,7 +1595,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
     format.
 
     Parameters:
-        filename: Name of file to open.
+        file: Name of file to open.
 
     Examples:
         >>> fbs = fbs_read('tests/data/flimbox.fbs.xml')
@@ -1606,6 +1610,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
     elif hasattr(file, 'seek'):
         fh = file
         close = False
+        fh.seek(0)
     else:
         raise ValueError(f'cannot open file of type {type(file)}')
 
@@ -1643,7 +1648,7 @@ def fbf_read(
     description.
 
     Parameters:
-        filename:
+        file:
             Name of FBF file to open.
         firmware:
             Include the firmware binary data.
@@ -1669,6 +1674,7 @@ def fbf_read(
     elif hasattr(file, 'seek'):
         fh = file
         close = False
+        fh.seek(0)
     else:
         raise ValueError(f'cannot open file of type {type(file)}')
 
