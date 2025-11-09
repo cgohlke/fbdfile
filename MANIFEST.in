@@ -18,6 +18,7 @@ exclude *.cmd
 exclude *.yaml
 exclude mypy.ini
 exclude *.code-workspace
+exclude .gitignore
 recursive-exclude .vscode *
 recursive-exclude doc *
 recursive-exclude docs *
