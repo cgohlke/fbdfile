@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.18
+:Version: 2025.11.8
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -61,16 +61,24 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.9 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.2.1
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.3.0
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.1.4 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.0 (build)
 
 Revisions
 ---------
+
+2025.11.8
+
+- Allow to override FbdFile decoder, firmware, and settings.
+- Always try to load settings from .fbs.xml file.
+- Factor out BinaryFile base class.
+- Derive FbdFileError from ValueError.
+- Build ABI3 wheels.
 
 2025.9.18
 
@@ -112,28 +120,28 @@ Examples
 
 Read a FLIM lifetime image and metadata from an FBD file:
 
->>> with FbdFile('tests/data/flimbox$CBCO.fbd') as fbd:
+>>> with FbdFile('tests/data/flimbox_data$CBCO.fbd') as fbd:
 ...     bins, times, markers = fbd.decode()
+...     image = fbd.asimage()
 ...
+>>> image.shape
+(1, 2, 256, 256, 64)
 >>> print(bins[0, :2], times[:2], markers[:2])
 [50 58] [ 0 32] [1944097 2024815]
 >>> import numpy
 >>> hist = [numpy.bincount(b[b >= 0]) for b in bins]
->>> int(numpy.argmax(hist[0]))
+>>> int(hist[0].argmax())
 53
->>> image = fbd.asimage((bins, times, markers))
->>> image.shape
-(1, 2, 256, 256, 64)
 
 View the histogram and metadata in a FLIMbox data file from the console::
 
-    $ python -m fbdfile tests/data/flimbox$CBCO.fbd
+    $ python -m fbdfile tests/data/flimbox_data$CBCO.fbd
 
 """
 
 from __future__ import annotations
 
-__version__ = '2025.9.18'
+__version__ = '2025.11.8'
 
 __all__ = [
     '__version__',
@@ -155,7 +163,7 @@ import struct
 import sys
 import warnings
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 if TYPE_CHECKING:
     from typing import Any, IO, Literal
@@ -168,11 +176,163 @@ import numpy
 from ._fbdfile import fbd_decode, fbd_histogram, sflim_decode
 
 
-class FbdFileError(Exception):
+class FbdFileError(ValueError):
     """Exception to indicate invalid FLIMbox data file."""
 
 
-class FbdFile:
+class BinaryFile:
+    """Binary file.
+
+    Parameters:
+        file:
+            File name or seekable binary stream.
+        mode:
+            File open mode if `file` is a file name.
+            The default is 'r'. Files are always opened in binary mode.
+
+    Raises:
+        ValueError:
+            Invalid file name, extension, or stream.
+            File is not a binary or seekable stream.
+
+    """
+
+    _fh: IO[bytes]
+    _path: str  # absolute path of file
+    _name: str  # name of file or handle
+    _close: bool  # file needs to be closed
+    _closed: bool  # file is closed
+    _ext: set[str] = set()  # valid extensions, empty for any
+
+    def __init__(
+        self,
+        file: str | os.PathLike[str] | IO[bytes],
+        /,
+        *,
+        mode: Literal['r', 'r+'] | None = None,
+    ) -> None:
+
+        self._path = ''
+        self._name = 'Unnamed'
+        self._close = False
+        self._closed = False
+
+        if isinstance(file, (str, os.PathLike)):
+            ext = os.path.splitext(file)[-1].lower()
+            if self._ext and ext not in self._ext:
+                raise ValueError(
+                    f'invalid file extension: {ext!r} not in {self._ext!r}'
+                )
+            if mode is None:
+                mode = 'r'
+            else:
+                if mode[-1:] == 'b':
+                    mode = mode[:-1]  # type: ignore[assignment]
+                if mode not in {'r', 'r+'}:
+                    raise ValueError(f'invalid {mode=!r}')
+            self._path = os.path.abspath(file)
+            self._close = True
+            self._fh = open(self._path, mode + 'b')
+
+        elif hasattr(file, 'seek'):
+            # binary stream: open file, BytesIO, fsspec LocalFileOpener
+            if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
+                raise ValueError(f'{file!r} is not open in binary mode')
+
+            self._fh = file
+            try:
+                self._fh.tell()
+            except Exception as exc:
+                raise ValueError(f'{file!r} is not seekable') from exc
+            if hasattr(file, 'path'):
+                self._path = os.path.normpath(file.path)
+            elif hasattr(file, 'name'):
+                self._path = os.path.normpath(file.name)
+
+        elif hasattr(file, 'open'):
+            # fsspec OpenFile
+            self._fh = file.open()
+            self._close = True
+            try:
+                self._fh.tell()
+            except Exception as exc:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                raise ValueError(f'{file!r} is not seekable') from exc
+            if hasattr(file, 'path'):
+                self._path = os.path.normpath(file.path)
+
+        else:
+            raise ValueError(f'cannot handle {type(file)=}')
+
+        if hasattr(file, 'name') and file.name:
+            self._name = os.path.basename(file.name)
+        elif self._path:
+            self._name = os.path.basename(self._path)
+        elif isinstance(file, io.BytesIO):
+            self._name = 'BytesIO'
+        # else:
+        #     self._name = f'{type(file)}'
+
+    @property
+    def filehandle(self) -> IO[bytes]:
+        """File handle."""
+        return self._fh
+
+    @property
+    def filepath(self) -> str:
+        """Path to file."""
+        return self._path
+
+    @property
+    def filename(self) -> str:
+        """Name of file or empty if binary stream."""
+        return os.path.basename(self._path)
+
+    @property
+    def dirname(self) -> str:
+        """Directory containing file or empty if binary stream."""
+        return os.path.dirname(self._path)
+
+    @property
+    def name(self) -> str:
+        """Display name of file."""
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+
+    @property
+    def closed(self) -> bool:
+        """File is closed."""
+        return self._closed
+
+    def close(self) -> None:
+        """Close file."""
+        if self._close:
+            try:
+                self._closed = True
+                self._fh.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> BinaryFile:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        if self._name:
+            return f'<{self.__class__.__name__} {self._name!r}>'
+        return f'<{self.__class__.__name__}>'
+
+
+@final
+class FbdFile(BinaryFile):
     """FLIMbox data file.
 
     FBD files contain encoded data from the FLIMbox device, storing a
@@ -218,13 +378,22 @@ class FbdFile:
     with large number of windows and channels.
 
     Parameters:
-        filename:
-            Name of file to open.
+        file:
+            File name or seekable binary stream.
         code:
             Four-character string, encoding frame size (1st char),
             pixel dwell time (2nd char), number of sampling windows
             (3rd char), and scanner type (4th char).
             By default, the code is extracted from the file name.
+        decoder:
+            Name of decoder settings function.
+        fbf:
+            FLIMbox firmware header settings.
+            By default, firmware settings are loaded from the file header,
+            if any.
+        fbs:
+            FLIMbox settings from FBS.XML file.
+            By default, settings are loaded from companion file, if any.
         frame_size:
             Number of pixels in one line scan, excluding retrace.
         windows:
@@ -256,19 +425,17 @@ class FbdFile:
 
     """
 
-    _fh: IO[bytes]
-    _path: str  # absolute path of file
-    _close: bool  # file needs to be closed
+    _ext: set[str] = {'.fbd'}
     _data_offset: int  # position of raw data in file
 
     header: numpy.recarray[Any, Any] | None
-    """FLIMbox file header, if any."""
+    """File header, if any."""
 
     fbf: dict[str, Any] | None
-    """FLIMbox firmware header settings, if any."""
+    """FFirmware header settings, if any."""
 
     fbs: dict[str, Any] | None
-    """FLIMbox settings from FBS.XML file, if any."""
+    """Settings from FBS.XML file, if any."""
 
     decoder: str | None
     """Decoder settings function."""
@@ -280,10 +447,10 @@ class FbdFile:
     """Number of pixels in one line scan, excluding retrace."""
 
     windows: int
-    """Number of sampling windows used by FLIMbox."""
+    """Number of sampling windows."""
 
     channels: int
-    """Number of channels used by FLIMbox."""
+    """Number of channels."""
 
     harmonics: int
     """First or second harmonics."""
@@ -575,6 +742,9 @@ class FbdFile:
         *,
         mode: Literal['r', 'r+'] | None = None,
         code: str = '',
+        decoder: str | None = None,
+        fbf: dict[str, Any] | None = None,
+        fbs: dict[str, Any] | None = None,
         frame_size: int = -1,
         windows: int = -1,
         channels: int = -1,
@@ -589,34 +759,13 @@ class FbdFile:
         scanner: str = '',
         synthesizer: str = '',
     ) -> None:
-        """Initialize instance from file name code or file header."""
-        if isinstance(file, (str, os.PathLike)):
-            if os.path.splitext(file)[1].lower() != '.fbd':
-                raise ValueError(f'not a .FBD file: {file!r}')
-            if mode is None:
-                mode = 'r'
-            else:
-                if mode[-1:] == 'b':
-                    mode = mode[:-1]  # type: ignore[assignment]
-                if mode not in {'r', 'r+'}:
-                    raise ValueError(f'invalid {mode=!r}')
-            self._path = os.path.abspath(file)
-            self._close = True
-            self._fh = open(self._path, mode + 'b')
-        elif hasattr(file, 'seek'):
-            self._path = ''
-            self._close = False
-            self._fh = file
-        else:
-            raise ValueError(f'cannot open file of type {type(file)}')
+        super().__init__(file, mode=mode)
 
-        self._fh = self._fh
-
-        self.decoder = None
-        self.fbf = None
-        self.fbs = None
         self.header = None
         self.code = code
+        self.decoder = decoder
+        self.fbf = fbf
+        self.fbs = fbs
         self.frame_size = frame_size
         self.windows = windows
         self.channels = channels
@@ -650,7 +799,7 @@ class FbdFile:
 
         assert len(self.code) == 4, code
 
-        if self.code[2].isnumeric() and self._from_fbs():
+        if self._from_fbs():  # and self.code[2].isnumeric()
             pass
         elif self.code[2] == '0':
             self._from_header()
@@ -660,6 +809,18 @@ class FbdFile:
         assert self.windows >= 0
         assert self.channels >= 0
         assert self.harmonics >= 0
+
+        if self.decoder is None:
+            bytes_ = 4 if self.is_32bit else 2
+            self.decoder = f'_b{bytes_}w{self.windows}c{self.channels}'
+            if (
+                self.windows == 16
+                and self.channels == 4
+                and self.fbf is not None
+                and self.fbf.get('time', '').endswith('Bit')
+            ):
+                t = self.fbf['time'][:-3]
+                self.decoder += f't{t}'
 
         if self.pdiv <= 0:
             try:
@@ -679,16 +840,22 @@ class FbdFile:
 
     def _from_fbs(self) -> bool:
         """Initialize instance from VistaVision settings file."""
-        for ext in ('.FBS.XML', '.fbs.xml'):
-            fname = self._path.rsplit('$', 1)[0] + ext
-            if os.path.exists(fname):
-                break
-        else:
-            return False
-        # self.pdiv = 1
-        fbs = fbs_read(fname)
-        scn = fbs['ScanParams']
-        self.fbf = fbf = fbf_parse_header(fbs['FirmwareParams']['Description'])
+        if self.fbs is None:
+            for ext in ('.FBS.XML', '.fbs.xml'):
+                fname = self._path.rsplit('$', 1)[0] + ext
+                if os.path.exists(fname):
+                    break
+            else:
+                return False
+            self.fbs = fbs_read(fname)
+
+        if self.fbf is None:
+            self.fbf = fbf_parse_header(
+                self.fbs['FirmwareParams']['Description']
+            )
+
+        fbf = self.fbf
+        scn = self.fbs['ScanParams']
         self.is_32bit = '32fifo' in fbf['decoder']
         if self.harmonics < 0:
             self.harmonics = (1, 2)[fbf['secondharmonic']]
@@ -725,7 +892,6 @@ class FbdFile:
                 self.pixel_dwell_time *= 1000
         if self.frame_size < 0:
             self.frame_size = scn['XPixels']
-        self.fbs = fbs
 
         self._fh.seek(0)
         try:
@@ -782,9 +948,8 @@ class FbdFile:
     def _from_header(self) -> None:
         """Initialize instance from 32 KB file header."""
         # the first 1024 bytes contain the start of a FLIMbox firmware file
-        self.fbf = fbf_read(self._fh.name)
-        assert self.fbf is not None
-        assert self._fh is not None
+        if self.fbf is None:
+            self.fbf = fbf_read(self._fh.name)
 
         self.is_32bit = '32fifo' in self.fbf['decoder']
 
@@ -924,21 +1089,13 @@ class FbdFile:
               shift to extract index into lookup table from data word.
 
         """
-        bytes_ = 4 if self.is_32bit else 2
-        decoder = f'_b{bytes_}w{self.windows}c{self.channels}'
-        if (
-            self.windows == 16
-            and self.channels == 4
-            and self.fbf is not None
-            and self.fbf.get('time', '').endswith('Bit')
-        ):
-            t = self.fbf['time'][:-3]
-            decoder += f't{t}'
-        self.decoder = decoder
+        assert self.decoder is not None
         try:
-            settings = getattr(self, decoder)()
+            settings = getattr(self, self.decoder)()
         except Exception as exc:
-            raise ValueError(f'Decoder{decoder} not implemented') from exc
+            raise ValueError(
+                f'decoder {self.decoder} not implemented'
+            ) from exc
         return settings  # type: ignore[no-any-return]
 
     @staticmethod
@@ -1236,7 +1393,6 @@ class FbdFile:
                 indicating frame starts. An array of type ssize_t.
 
         """
-        assert self._fh is not None
         dtype = numpy.dtype('<u4' if self.is_32bit else '<u2')
         if data is None:
             self._fh.seek(self._data_offset + skip_words * dtype.itemsize, 0)
@@ -1473,47 +1629,8 @@ class FbdFile:
             ]
         return result
 
-    @property
-    def filehandle(self) -> IO[bytes]:
-        """File handle."""
-        return self._fh
-
-    @property
-    def filename(self) -> str:
-        """Name of file or empty if binary stream."""
-        return os.path.basename(self._path)
-
-    @property
-    def dirname(self) -> str:
-        """Directory containing file."""
-        return os.path.dirname(self._path)
-
-    @property
-    def name(self) -> str:
-        """Name of file or handle."""
-        if self._path:
-            return os.path.basename(self._path)
-        if hasattr(self._fh, 'name') and self._fh.name:
-            return self._fh.name
-        return ''
-
-    def close(self) -> None:
-        """Close file handle and free resources."""
-        if self._close:
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-
     def __enter__(self) -> FbdFile:
         return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
-
-    def __repr__(self) -> str:
-        name = 'BytesIO' if isinstance(self._fh, io.BytesIO) else self.name
-        return f'<{self.__class__.__name__} {name!r}>'
 
     def __str__(self) -> str:
         info = [repr(self)]
@@ -1598,7 +1715,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
         file: Name of file to open.
 
     Examples:
-        >>> fbs = fbs_read('tests/data/flimbox.fbs.xml')
+        >>> fbs = fbs_read('tests/data/flimbox_settings.fbs.xml')
         >>> fbs['ScanParams']['ExcitationFrequency']
         20000000
 
@@ -1656,7 +1773,7 @@ def fbf_read(
             Maximum length of ASCII header.
 
     Examples:
-        >>> header = fbf_read('tests/data/flimbox.fbf')
+        >>> header = fbf_read('tests/data/flimbox_firmware.fbf')
         >>> header['windows']
         16
         >>> header['channels']
