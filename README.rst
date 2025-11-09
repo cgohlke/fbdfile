@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.18
+:Version: 2025.11.8
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -34,16 +34,24 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.9 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.2.1
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.3.0
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.1.4 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.0 (build)
 
 Revisions
 ---------
+
+2025.11.8
+
+- Allow to override FbdFile decoder, firmware, and settings.
+- Always try to load settings from .fbs.xml file.
+- Factor out BinaryFile base class.
+- Derive FbdFileError from ValueError.
+- Build ABI3 wheels.
 
 2025.9.18
 
@@ -87,19 +95,19 @@ Read a FLIM lifetime image and metadata from an FBD file:
 
 .. code-block:: python
 
-    >>> with FbdFile('tests/data/flimbox$CBCO.fbd') as fbd:
+    >>> with FbdFile('tests/data/flimbox_data$CBCO.fbd') as fbd:
     ...     bins, times, markers = fbd.decode()
+    ...     image = fbd.asimage()
     ...
+    >>> image.shape
+    (1, 2, 256, 256, 64)
     >>> print(bins[0, :2], times[:2], markers[:2])
     [50 58] [ 0 32] [1944097 2024815]
     >>> import numpy
     >>> hist = [numpy.bincount(b[b >= 0]) for b in bins]
-    >>> int(numpy.argmax(hist[0]))
+    >>> int(hist[0].argmax())
     53
-    >>> image = fbd.asimage((bins, times, markers))
-    >>> image.shape
-    (1, 2, 256, 256, 64)
 
 View the histogram and metadata in a FLIMbox data file from the console::
 
-    $ python -m fbdfile tests/data/flimbox$CBCO.fbd
+    $ python -m fbdfile tests/data/flimbox_data$CBCO.fbd
