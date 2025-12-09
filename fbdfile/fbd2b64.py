@@ -133,20 +133,22 @@ def main() -> None:
         type=click.IntRange(0),
     )
     def fbd2b64(
-        pdiv,
-        laser_frequency,
-        laser_factor,
-        pixel_dwell_time,
-        integrate_frames,
-        full_frame,
-        frame_size,
-        scanner_line_length,
-        scanner_line_start,
-        scanner_frame_start,
-        show,
-        quiet,
-        fbdfile,
-    ):
+        *,
+        pdiv: int,
+        laser_frequency: float,
+        laser_factor: float,
+        pixel_dwell_time: float,
+        integrate_frames: int,
+        full_frame: bool,
+        frame_size: int,
+        scanner_line_length: int,
+        scanner_line_start: int,
+        scanner_frame_start: int,
+        show: bool,
+        quiet: bool,
+        fbdfile: str | None,
+    ) -> None:
+        """Convert FLIMbox data file to SimFCS B64 files."""
         if not fbdfile:
             fbdfile = askopenfilename(
                 title='Select a FBD file(s)',
@@ -188,8 +190,7 @@ def main() -> None:
                 scanner_frame_start=scanner_frame_start,
             )
             if not quiet and not show:
-                print()
-                print('Done')
+                print('\n', 'Done')  # noqa: T201
 
     fbd2b64(prog_name='fbd2b64')  # pylint: disable=no-value-for-parameter
 
