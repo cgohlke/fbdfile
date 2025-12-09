@@ -17,6 +17,7 @@ exclude .env
 exclude *.cmd
 exclude *.yaml
 exclude mypy.ini
+exclude ruff.toml
 exclude *.code-workspace
 exclude .gitignore
 recursive-exclude .vscode *
