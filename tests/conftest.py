@@ -1,5 +1,7 @@
 # fbdfile/tests/conftest.py
 
+"""Pytest configuration."""
+
 import os
 import sys
 
@@ -10,15 +12,15 @@ if os.environ.get('VSCODE_CWD'):
     )
 
 
-def pytest_report_header(config):
+def pytest_report_header(config: object) -> str:
+    """Return pytest report header."""
     try:
-        pyversion = f'Python {sys.version.splitlines()[0]}'
         import fbdfile
 
-        return '{}\npackagedir: {}\nversion: fbdfile {}'.format(
-            pyversion,
-            fbdfile.__path__[0],
-            fbdfile.__version__,
+        return (
+            f'Python {sys.version.splitlines()[0]}\n'
+            f'packagedir: {fbdfile.__path__[0]}\n'
+            f'version: fbdfile {fbdfile.__version__}'
         )
     except Exception as exc:
         return f'pytest_report_header failed: {exc!s}'
