@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2025.11.8
+:Version: 2025.12.12
 
 """
 
@@ -46,12 +46,12 @@ from lfdfiles import SimfcsB64
 from numpy.testing import assert_almost_equal, assert_array_equal
 
 import fbdfile
+from fbdfile import FbdFileError  # noqa: F401
+from fbdfile import fbd_decode  # noqa: F401
+from fbdfile import fbd_histogram  # noqa: F401
 from fbdfile import (
     FbdFile,
-    FbdFileError,
     __version__,
-    fbd_decode,
-    fbd_histogram,
     fbd_to_b64,
     fbf_read,
     fbs_read,
@@ -110,6 +110,7 @@ class TestBinaryFile:
         filename: str | None = None,
         dirname: str | None = None,
         name: str | None = None,
+        *,
         closed: bool = True,
     ) -> None:
         """Assert BinaryFile attributes."""
@@ -121,6 +122,10 @@ class TestBinaryFile:
             dirname = os.path.dirname(self.fname)
         if name is None:
             name = fh.filename
+
+        attrs = fh.attrs
+        assert attrs['name'] == name
+        assert attrs['filepath'] == filepath
 
         assert fh.filepath == filepath
         assert fh.filename == filename
@@ -148,9 +153,8 @@ class TestBinaryFile:
 
     def test_open_file(self):
         """Test BinaryFile with open binary file."""
-        with open(self.fname, 'rb') as fh:
-            with BinaryFile(fh) as bf:
-                self.validate(bf, closed=False)
+        with open(self.fname, 'rb') as fh, BinaryFile(fh) as bf:
+            self.validate(bf, closed=False)
 
     def test_bytesio(self):
         """Test BinaryFile with BytesIO."""
@@ -181,8 +185,8 @@ class TestBinaryFile:
 
     def test_text_file_fails(self):
         """Test BinaryFile with open text file fails."""
-        with open(self.fname) as fh:
-            with pytest.raises(ValueError):
+        with open(self.fname) as fh:  # noqa: SIM117
+            with pytest.raises(TypeError):
                 BinaryFile(fh)
 
     def test_file_extension_fails(self):
@@ -213,6 +217,7 @@ class TestBinaryFile:
             # mock fsspec OpenFile without seek/tell methods
             @staticmethod
             def open(*args, **kwargs):
+                del args, kwargs
                 return File()
 
         with pytest.raises(ValueError):
@@ -268,6 +273,29 @@ class TestFbdFile:
         image = fbd.asimage((bins, times, markers), (shape, frame_markers))
         assert image.shape == (1, 2, 256, 256, 64)
         assert image[0, 0, 128, 128].sum() == 347
+
+        attrs = fbd.attrs
+        assert attrs['name'] == fbd.name
+        assert attrs['filepath'] == fbd.filepath
+        assert attrs['channels'] == fbd.channels
+        assert attrs['code'] == fbd.code
+        assert attrs['decoder'] == fbd.decoder
+        assert attrs['frame_size'] == fbd.frame_size
+        assert attrs['harmonics'] == fbd.harmonics
+        assert attrs['is_32bit'] == fbd.is_32bit
+        assert attrs['laser_factor'] == fbd.laser_factor
+        assert attrs['laser_frequency'] == fbd.laser_frequency
+        assert attrs['pdiv'] == fbd.pdiv
+        assert attrs['pixel_dwell_time'] == fbd.pixel_dwell_time
+        assert attrs['pmax'] == fbd.pmax
+        assert attrs['scanner'] == fbd.scanner
+        assert attrs['scanner_frame_start'] == fbd.scanner_frame_start
+        assert attrs['scanner_line_add'] == fbd.scanner_line_add
+        assert attrs['scanner_line_length'] == fbd.scanner_line_length
+        assert attrs['scanner_line_start'] == fbd.scanner_line_start
+        assert attrs['synthesizer'] == fbd.synthesizer
+        assert attrs['units_per_sample'] == fbd.units_per_sample
+        assert attrs['windows'] == fbd.windows
 
     def test_str(self):
         """Test FbdFile with str path."""
@@ -914,6 +942,24 @@ def test_xml2dict():
 
 
 @pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
+def test_lfdfiles():
+    """Test lfdfiles.FlimboxFbd class docstring."""
+    from lfdfiles import FlimboxFbd
+
+    fname = DATA / 'flimbox_data$CBCO.fbd'
+    with FlimboxFbd(fname) as f:
+        bins, times, markers = f.decode(word_count=500000, skip_words=1900000)
+        hist = [numpy.bincount(b[b >= 0]) for b in bins]
+
+        assert isinstance(f.laser_frequency, float)
+        assert f.laser_frequency == 20000000.0
+        assert bins[0, :2].tolist() == [53, 51]
+        assert times[:2].tolist() == [0, 42]
+        assert markers.tolist() == [44097, 124815]
+        assert numpy.argmax(hist[0]) == 53
+
+
+@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
 def test_lfdfiles_fbd():
     """Test lfdfiles.FlimboxFbd class."""
     from lfdfiles import FlimboxFbd
@@ -946,7 +992,7 @@ def test_lfdfiles_fbd():
         assert image.sum(dtype=numpy.uint64) == 4287217
 
         with pytest.raises(AttributeError):
-            fbd.non_existant
+            _ = fbd.non_existant
 
         if SHOW:
             fbd.show(cmap='turbo')
