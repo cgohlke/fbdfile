@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.11.8
+:Version: 2025.12.12
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -61,16 +61,21 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.5
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.3.0
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.12.12 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.0 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.2 (build)
 
 Revisions
 ---------
+
+2025.12.12
+
+- Add attrs property to FbdFile.
+- Improve code quality.
 
 2025.11.8
 
@@ -141,12 +146,12 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.11.8'
+__version__ = '2025.12.12'
 
 __all__ = [
-    '__version__',
     'FbdFile',
     'FbdFileError',
+    '__version__',
     'fbd_decode',
     'fbd_histogram',
     'fbd_to_b64',
@@ -163,13 +168,14 @@ import struct
 import sys
 import warnings
 from functools import cached_property
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, ClassVar, final
 
 if TYPE_CHECKING:
-    from typing import Any, IO, Literal
-    from collections.abc import Sequence, Container
+    from collections.abc import Container, Sequence
+    from types import TracebackType
+    from typing import IO, Any, Literal, Self
 
-    from numpy.typing import NDArray, ArrayLike
+    from numpy.typing import ArrayLike, NDArray
 
 import numpy
 
@@ -202,7 +208,7 @@ class BinaryFile:
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
-    _ext: set[str] = set()  # valid extensions, empty for any
+    _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
     def __init__(
         self,
@@ -232,12 +238,12 @@ class BinaryFile:
                     raise ValueError(f'invalid {mode=!r}')
             self._path = os.path.abspath(file)
             self._close = True
-            self._fh = open(self._path, mode + 'b')
+            self._fh = open(self._path, mode + 'b')  # noqa: SIM115
 
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                raise ValueError(f'{file!r} is not open in binary mode')
+                raise TypeError(f'{file!r} is not open in binary mode')
 
             self._fh = file
             try:
@@ -258,7 +264,7 @@ class BinaryFile:
             except Exception as exc:
                 try:
                     self._fh.close()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 raise ValueError(f'{file!r} is not seekable') from exc
             if hasattr(file, 'path'):
@@ -306,6 +312,11 @@ class BinaryFile:
         self._name = value
 
     @property
+    def attrs(self) -> dict[str, Any]:
+        """Selected metadata as dict."""
+        return {'name': self.name, 'filepath': self.filepath}
+
+    @property
     def closed(self) -> bool:
         """File is closed."""
         return self._closed
@@ -316,13 +327,18 @@ class BinaryFile:
             try:
                 self._closed = True
                 self._fh.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
-    def __enter__(self) -> BinaryFile:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __repr__(self) -> str:
@@ -425,14 +441,14 @@ class FbdFile(BinaryFile):
 
     """
 
-    _ext: set[str] = {'.fbd'}
+    _ext: ClassVar[set[str]] = {'.fbd'}
     _data_offset: int  # position of raw data in file
 
     header: numpy.recarray[Any, Any] | None
     """File header, if any."""
 
     fbf: dict[str, Any] | None
-    """FFirmware header settings, if any."""
+    """Firmware header settings, if any."""
 
     fbs: dict[str, Any] | None
     """Settings from FBS.XML file, if any."""
@@ -503,7 +519,7 @@ class FbdFile(BinaryFile):
         'scanner_frame_start',
     )
 
-    _frame_size: dict[str, int] = {
+    _frame_size: ClassVar[dict[str, int]] = {
         # Map 1st character in file name tag to image frame size
         'A': 64,
         'B': 128,
@@ -515,7 +531,7 @@ class FbdFile(BinaryFile):
         'H': 1024,
     }
 
-    _flimbox_settings: dict[str, tuple[int, int, int]] = {
+    _flimbox_settings: ClassVar[dict[str, tuple[int, int, int]]] = {
         # Map 3rd character in file name tag to (windows, channels, harmonics)
         # '0': file contains header
         'A': (2, 2, 1),
@@ -535,7 +551,7 @@ class FbdFile(BinaryFile):
         'S': (64, 1, 2),
     }
 
-    _scanner_settings: dict[str, dict[str, Any]] = {
+    _scanner_settings: ClassVar[dict[str, dict[str, Any]]] = {
         # Map 4th and 2nd character in file name tag to pixel_dwell_time,
         # scanner_line_add, scanner_line_start, and scanner_frame_start.
         # As of SimFCS ~2011.
@@ -631,7 +647,7 @@ class FbdFile(BinaryFile):
         },
     }
 
-    _header_t = [
+    _header_t: list[tuple[str, str]] = [  # noqa: RUF012
         # Binary header starting at offset 1024 in files with $xx0x names.
         # This is written as a memory dump of a Delphi record, hence the pads
         ('owner', '<i4'),  # must be 0
@@ -688,12 +704,12 @@ class FbdFile(BinaryFile):
         ('show_channel_index', '<i4'),
     ]
 
+    # fmt: off
     _header_pixel_dwell_time = (
-        # fmt: off
         1, 2, 4, 5, 8, 10, 16, 20, 32, 50, 64,
         100, 128, 200, 256, 500, 512, 1000, 2000,
-        # fmt: on
     )
+    # fmt: on
 
     _header_frame_size = (64, 128, 256, 320, 512, 640, 800, 1024)
 
@@ -792,7 +808,8 @@ class FbdFile(BinaryFile):
                 self.code = 'CFCS'  # old FLIMbox file ?
                 warnings.warn(
                     'FbdFile: failed to parse code from file name. '
-                    f'Using {self.code!r}'
+                    f'Using {self.code!r}',
+                    stacklevel=2,
                 )
             else:
                 self.code = match.group(1)
@@ -941,7 +958,7 @@ class FbdFile(BinaryFile):
         if self.synthesizer == '':
             self.synthesizer = 'Unknown'
         if self.laser_frequency < 0:
-            self.laser_frequency = 20000000 * self.harmonics
+            self.laser_frequency = 20000000.0 * self.harmonics
         if self.laser_factor < 0:
             self.laser_factor = 1.0
 
@@ -1070,6 +1087,36 @@ class FbdFile(BinaryFile):
             * (self.pmax / (self.pmax - 1))
             * (self.laser_frequency * self.laser_factor)
         )
+
+    @property
+    def attrs(self) -> dict[str, Any]:
+        """Selected metadata as dict."""
+        return {
+            **super().attrs,
+            # 'header': self.header,
+            # 'fbf': self.fbf,
+            # 'fbs': self.fbs,
+            # 'decoder_settings': self.decoder_settings,
+            'channels': self.channels,
+            'code': self.code,
+            'decoder': self.decoder,
+            'frame_size': self.frame_size,
+            'harmonics': self.harmonics,
+            'is_32bit': self.is_32bit,
+            'laser_factor': self.laser_factor,
+            'laser_frequency': self.laser_frequency,
+            'pdiv': self.pdiv,
+            'pixel_dwell_time': self.pixel_dwell_time,
+            'pmax': self.pmax,
+            'scanner': self.scanner,
+            'scanner_frame_start': self.scanner_frame_start,
+            'scanner_line_add': self.scanner_line_add,
+            'scanner_line_length': self.scanner_line_length,
+            'scanner_line_start': self.scanner_line_start,
+            'synthesizer': self.synthesizer,
+            'units_per_sample': self.units_per_sample,
+            'windows': self.windows,
+        }
 
     @cached_property
     def decoder_settings(self) -> dict[str, NDArray[numpy.int16] | int]:
@@ -1393,6 +1440,7 @@ class FbdFile(BinaryFile):
                 indicating frame starts. An array of type ssize_t.
 
         """
+        del kwargs  # unused
         dtype = numpy.dtype('<u4' if self.is_32bit else '<u2')
         if data is None:
             self._fh.seek(self._data_offset + skip_words * dtype.itemsize, 0)
@@ -1432,7 +1480,8 @@ class FbdFile(BinaryFile):
         markers_out = markers_out[markers_out > 0]
         if len(markers_out) == max_markers:
             warnings.warn(
-                f'number of markers exceeded buffer size {max_markers}'
+                f'number of markers exceeded buffer size {max_markers}',
+                stacklevel=2,
             )
 
         return bins_out, times_out, markers_out
@@ -1494,7 +1543,7 @@ class FbdFile(BinaryFile):
                 else:
                     continue
                 line_num = min(line_num, lines)
-            line_num = int(round(line_num))
+            line_num = round(line_num)
 
         if not frame_markers:
             # calculate frame duration clusters, assuming few clusters that
@@ -1503,17 +1552,17 @@ class FbdFile(BinaryFile):
             clusters: list[list[int]] = []
             cluster_indices = []
             for d in frame_durations:
-                d = int(d)
+                d_int = int(d)
                 for i, c in enumerate(clusters):
-                    if abs(d - c[0]) < cluster_size:
+                    if abs(d_int - c[0]) < cluster_size:
                         cluster_indices.append(i)
-                        c[0] = min(c[0], d)
+                        c[0] = min(c[0], d_int)
                         c[1] += 1
                         break
                 else:
                     cluster_indices.append(len(clusters))
-                    clusters.append([d, 1])
-            clusters = list(sorted(clusters, key=lambda x: x[1], reverse=True))
+                    clusters.append([d_int, 1])
+            clusters = sorted(clusters, key=lambda x: x[1], reverse=True)
             # possible correction factors, assuming square frame shape
             line_num = self.frame_size
             laser_factors = [c[0] / (line_time * line_num) for c in clusters]
@@ -1535,7 +1584,7 @@ class FbdFile(BinaryFile):
                 msg.append(
                     f'The most probable correction factors are: {factors}'
                 )
-            warnings.warn('\n'.join(msg))
+            warnings.warn('\n'.join(msg), stacklevel=2)
 
         if not isinstance(select_frames, slice):
             select_frames = slice(select_frames)
@@ -1593,7 +1642,7 @@ class FbdFile(BinaryFile):
         )
         if records is None:
             records = self.decode(num_threads=num_threads, **kwargs)
-        bins, times, markers = records
+        bins, times, _markers = records
         if frames is None:
             frames = self.frames(records, **kwargs_frames)
         scanner_shape, frame_markers = frames
@@ -1722,7 +1771,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
     """
     fh: IO[str]
     if isinstance(file, (str, os.PathLike)):
-        fh = open(file, encoding='utf-8')
+        fh = open(file, encoding='utf-8')  # noqa: SIM115
         close = True
     elif hasattr(file, 'seek'):
         fh = file
@@ -1741,7 +1790,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
         if close:
             try:
                 fh.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
     info = xml2dict(buf)
@@ -1786,7 +1835,7 @@ def fbf_read(
     """
     fh: IO[bytes]
     if isinstance(file, (str, os.PathLike)):
-        fh = open(file, 'rb')
+        fh = open(file, 'rb')  # noqa: SIM115
         close = True
     elif hasattr(file, 'seek'):
         fh = file
@@ -1813,7 +1862,7 @@ def fbf_read(
         if close:
             try:
                 fh.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
     return meta
 
@@ -1826,12 +1875,11 @@ def fbf_parse_header(header: str, /) -> dict[str, Any]:
         comment = [comment_]
     except ValueError:
         comment = []
-    for name, value, unit in re.findall(
-        r'([a-zA-Z\s]*)([.\d]*)([a-zA-Z\d]*)/', header
-    ):
+    for matches in re.findall(r'([a-zA-Z\s]*)([.\d]*)([a-zA-Z\d]*)/', header):
+        name, value, unit = matches
         name = name.strip().lower()
         if not name:
-            name = {'w': 'windows', 'ch': 'channels'}.get(unit, None)
+            name = {'w': 'windows', 'ch': 'channels'}.get(unit)
             unit = ''
         if not name:
             comment.append(name + value + unit)
@@ -1839,10 +1887,7 @@ def fbf_parse_header(header: str, /) -> dict[str, Any]:
         if unit == 'MHz':
             unit = 1000000
         try:
-            if unit:
-                value = int(value) * int(unit)
-            else:
-                value = int(value)
+            value = (int(value) * int(unit)) if unit else int(value)
             unit = 0
         except ValueError:
             pass
@@ -1879,6 +1924,7 @@ def _fbd_decode(
     This implementation is for reference only. Do not use!
 
     """
+    del marker_shr
     tcc = data & tcc_mask  # cross correlation time
     if tcc_shr:
         tcc >>= tcc_shr
@@ -1938,8 +1984,8 @@ def _fbd_histogram(
 
     """
     nframes, nchannels, frame_length, nwindows = out.shape
-    for f, (j, k) in enumerate(frame_markers):
-        f = f % nframes
+    for i, (j, k) in enumerate(frame_markers):
+        f = i % nframes
         t = times[j:k] - times[j]
         t /= units_per_sample  # index into flattened array
         if scanner_frame_start:
@@ -2162,10 +2208,10 @@ def format_dict(
         if any(k.startswith(e) for e in excludes):
             continue
         if isinstance(v, dict):
-            v = '\n' + format_dict(
+            w = '\n' + format_dict(
                 v, prefix=prefix + indent, excludes=excludes, trim=0
             )
-            result.append(f'{prefix}{bullets[1]}{k}: {v}')
+            result.append(f'{prefix}{bullets[1]}{k}: {w}')
         else:
             result.append((f'{prefix}{bullets[0]}{k}: {v}')[:linelen].rstrip())
     if trim > 0:
@@ -2175,7 +2221,7 @@ def format_dict(
 
 def nullfunc(*args: Any, **kwargs: Any) -> None:
     """Null function."""
-    return
+    del args, kwargs
 
 
 def stripnull(string: bytes) -> bytes:
@@ -2293,7 +2339,7 @@ def xml2dict(
                 d[key] = astype(text)
         return d
 
-    result = etree2dict(ElementTree.fromstring(xml))
+    result = etree2dict(ElementTree.fromstring(xml))  # noqa: S314
     return {} if result is None else result
 
 
@@ -2393,7 +2439,7 @@ def main() -> int:
             if isinstance(files, (list, tuple)):
                 files = files[0]
             with FbdFile(files) as fbd:
-                print(fbd)
+                print(fbd)  # noqa: T201
                 fbd.plot()
 
     if len(sys.argv) == 1:
