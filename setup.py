@@ -12,7 +12,7 @@ from setuptools import Extension, setup
 
 buildnumber = ''
 
-DEBUG = bool(os.environ.get('CG_DEBUG', False))
+DEBUG = bool(os.environ.get('CG_DEBUG', ''))
 LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
 
 if LIMITED_API and not sysconfig.get_config_var('Py_GIL_DISABLED'):
@@ -32,7 +32,8 @@ def search(pattern: str, string: str, flags: int = 0) -> str:
     """Return first match of pattern in string."""
     match = re.search(pattern, string, flags)
     if match is None:
-        raise ValueError(f'{pattern!r} not found')
+        msg = f'{pattern=!r} not found'
+        raise ValueError(msg)
     return match.groups()[0]
 
 
@@ -68,7 +69,7 @@ readme = search(
     re.MULTILINE | re.DOTALL,
 )
 readme = '\n'.join(
-    [description, '=' * len(description)] + readme.splitlines()[1:]
+    [description, '=' * len(description), *readme.splitlines()[1:]]
 )
 
 if 'sdist' in sys.argv:
@@ -129,8 +130,8 @@ ext_modules = [
     Extension(
         'fbdfile._fbdfile',
         ['fbdfile/_fbdfile.pyx'],
-        define_macros=define_macros
-        + [
+        define_macros=[
+            *define_macros,
             # ('CYTHON_TRACE_NOGIL', '1'),
             ('NPY_NO_DEPRECATED_API', 'NPY_2_0_API_VERSION'),
         ],
