@@ -1,6 +1,6 @@
 # test_fbdfile.py
 
-# Copyright (c) 2012-2025, Christoph Gohlke
+# Copyright (c) 2012-2026, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2025.12.12
+:Version: 2026.1.14
 
 """
 
@@ -46,12 +46,12 @@ from lfdfiles import SimfcsB64
 from numpy.testing import assert_almost_equal, assert_array_equal
 
 import fbdfile
-from fbdfile import FbdFileError  # noqa: F401
-from fbdfile import fbd_decode  # noqa: F401
-from fbdfile import fbd_histogram  # noqa: F401
 from fbdfile import (
     FbdFile,
+    FbdFileError,
     __version__,
+    fbd_decode,
+    fbd_histogram,
     fbd_to_b64,
     fbf_read,
     fbs_read,
@@ -91,6 +91,8 @@ except ImportError:
 def test_version():
     """Assert fbdfile versions match docstrings."""
     ver = ':Version: ' + __version__
+    assert __doc__ is not None
+    assert fbdfile.__doc__ is not None
     assert ver in __doc__
     assert ver in fbdfile.__doc__
 
@@ -992,7 +994,7 @@ def test_lfdfiles_fbd():
         assert image.sum(dtype=numpy.uint64) == 4287217
 
         with pytest.raises(AttributeError):
-            _ = fbd.non_existant
+            _ = fbd.non_existent
 
         if SHOW:
             fbd.show(cmap='turbo')
