@@ -1,6 +1,6 @@
 # fbdfile.py
 
-# Copyright (c) 2012-2025, Christoph Gohlke
+# Copyright (c) 2012-2026, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.12.12
+:Version: 2026.1.14
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -62,15 +62,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.5
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.12.12 (optional)
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.2 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
 
 Revisions
 ---------
+
+2026.1.14
+
+- Improve code quality.
 
 2025.12.12
 
@@ -146,7 +150,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.12.12'
+__version__ = '2026.1.14'
 
 __all__ = [
     'FbdFile',
@@ -160,6 +164,7 @@ __all__ = [
     'sflim_decode',
 ]
 
+import contextlib
 import io
 import logging
 import os
@@ -226,16 +231,16 @@ class BinaryFile:
         if isinstance(file, (str, os.PathLike)):
             ext = os.path.splitext(file)[-1].lower()
             if self._ext and ext not in self._ext:
-                raise ValueError(
-                    f'invalid file extension: {ext!r} not in {self._ext!r}'
-                )
+                msg = f'invalid file extension: {ext!r} not in {self._ext!r}'
+                raise ValueError(msg)
             if mode is None:
                 mode = 'r'
             else:
                 if mode[-1:] == 'b':
                     mode = mode[:-1]  # type: ignore[assignment]
                 if mode not in {'r', 'r+'}:
-                    raise ValueError(f'invalid {mode=!r}')
+                    msg = f'invalid {mode=!r}'
+                    raise ValueError(msg)
             self._path = os.path.abspath(file)
             self._close = True
             self._fh = open(self._path, mode + 'b')  # noqa: SIM115
@@ -243,13 +248,15 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                raise TypeError(f'{file!r} is not open in binary mode')
+                msg = f'{file!r} is not open in binary mode'
+                raise TypeError(msg)
 
             self._fh = file
             try:
                 self._fh.tell()
             except Exception as exc:
-                raise ValueError(f'{file!r} is not seekable') from exc
+                msg = f'{file!r} is not seekable'
+                raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
             elif hasattr(file, 'name'):
@@ -262,16 +269,16 @@ class BinaryFile:
             try:
                 self._fh.tell()
             except Exception as exc:
-                try:
+                with contextlib.suppress(Exception):
                     self._fh.close()
-                except Exception:  # noqa: S110
-                    pass
-                raise ValueError(f'{file!r} is not seekable') from exc
+                msg = f'{file!r} is not seekable'
+                raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
 
         else:
-            raise ValueError(f'cannot handle {type(file)=}')
+            msg = f'cannot handle {type(file)=}'
+            raise ValueError(msg)
 
         if hasattr(file, 'name') and file.name:
             self._name = os.path.basename(file.name)
@@ -840,20 +847,20 @@ class FbdFile(BinaryFile):
                 self.decoder += f't{t}'
 
         if self.pdiv <= 0:
-            try:
+            with contextlib.suppress(AttributeError):
                 self.pdiv = max(1, self.pmax // 64)
-            except AttributeError:
-                pass
         assert self.pdiv >= 0
 
         for attr in self._attributes:
             value = getattr(self, attr)
             if isinstance(value, (int, float)):
                 if value < 0:
-                    raise ValueError(f"'{attr}' not initialized")
+                    msg = f'{attr!r} not initialized'
+                    raise ValueError(msg)
             elif not value:
                 # empty str
-                raise ValueError(f"'{attr}' not initialized")
+                msg = f'{attr!r} not initialized'
+                raise ValueError(msg)
 
     def _from_fbs(self) -> bool:
         """Initialize instance from VistaVision settings file."""
@@ -974,7 +981,8 @@ class FbdFile(BinaryFile):
         self._fh.seek(1024)
         self.header = hdr = numpy.fromfile(self._fh, self._header_t, 1)[0]
         if hdr['owner'] != 0:
-            raise ValueError(f"unknown header format '{hdr['owner']}'")
+            msg = f'unknown header format {hdr["owner"]!r}'
+            raise ValueError(msg)
 
         # detect corrupted header: the my?calib fields may be missing
         if (
@@ -1140,9 +1148,8 @@ class FbdFile(BinaryFile):
         try:
             settings = getattr(self, self.decoder)()
         except Exception as exc:
-            raise ValueError(
-                f'decoder {self.decoder} not implemented'
-            ) from exc
+            msg = f'decoder {self.decoder!r} not implemented'
+            raise ValueError(msg) from exc
         return settings  # type: ignore[no-any-return]
 
     @staticmethod
@@ -1276,7 +1283,7 @@ class FbdFile(BinaryFile):
         table = numpy.full((2, 81), -1, numpy.int16)
         table[0, 1:9] = range(8)
         table[1, 9:17] = range(8)
-        table[:, 17:] = numpy.mgrid[0:8, 0:8].reshape(2, -1)[::-1, :]
+        table[:, 17:] = numpy.mgrid[0:8, 0:8].reshape((2, -1))[::-1, :]
         return {
             'decoder_table': table,
             'tcc_mask': 0xFF,
@@ -1384,19 +1391,21 @@ class FbdFile(BinaryFile):
     def _b2w32c2() -> dict[str, NDArray[numpy.int16] | int]:
         # return parameters to decode 32 windows, 2 channels
         # TODO
-        raise NotImplementedError(
+        msg = (
             'FbdFile: b2w32c2 decoder not implemented. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
+        raise NotImplementedError(msg)
 
     @staticmethod
     def _b2w64c1() -> dict[str, NDArray[numpy.int16] | int]:
         # return parameters to decode 64 windows, 1 channel
         # TODO
-        raise NotImplementedError(
+        msg = (
             'FbdFile: b2w64c1 decoder not implemented. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
+        raise NotImplementedError(msg)
 
     def decode(
         self,
@@ -1456,7 +1465,8 @@ class FbdFile(BinaryFile):
             else:
                 data = data[skip_words : skip_words + word_count]
         if data.dtype != dtype:
-            raise ValueError('invalid data dtype')
+            msg = 'invalid data dtype'
+            raise ValueError(msg)
 
         bins_out = numpy.empty(
             (self.channels, data.size),
@@ -1574,23 +1584,24 @@ class FbdFile(BinaryFile):
                 for i, c in enumerate(cluster_indices)
                 if c == frame_cluster
             ]
-            msg = [
+            msgs = [
                 'no frames detected with default settings. '
                 'Using square shape and correction factor '
                 f'{self.laser_factor:.5f}.'
             ]
             if len(laser_factors) > 1:
                 factors = ', '.join(f'{i:.5f}' for i in laser_factors[:4])
-                msg.append(
+                msgs.append(
                     f'The most probable correction factors are: {factors}'
                 )
-            warnings.warn('\n'.join(msg), stacklevel=2)
+            warnings.warn('\n'.join(msgs), stacklevel=2)
 
         if not isinstance(select_frames, slice):
             select_frames = slice(select_frames)
         frame_markers = frame_markers[select_frames]
         if not frame_markers:
-            raise ValueError('no frames selected')
+            msg = 'no frames selected'
+            raise ValueError(msg)
         return (
             (line_num, self.scanner_line_length),
             numpy.asarray(frame_markers, dtype=numpy.intp),
@@ -1778,25 +1789,26 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
         close = False
         fh.seek(0)
     else:
-        raise ValueError(f'cannot open file of type {type(file)}')
+        msg = f'cannot open file of type {type(file)}'
+        raise ValueError(msg)
 
     try:
         buf = fh.read(100)
         if not ('<?xml ' in buf and '<FastFlimFbdDataSettings>' in buf):
-            raise ValueError('invalid FBS file format')
+            msg = 'invalid FBS file format'
+            raise ValueError(msg)
         fh.seek(0)
         buf = fh.read()
     finally:
         if close:
-            try:
+            with contextlib.suppress(Exception):
                 fh.close()
-            except Exception:  # noqa: S110
-                pass
 
     info = xml2dict(buf)
     result: dict[str, Any] = info['FastFlimFbdDataSettings']
     if not result:
-        raise ValueError('no FastFlimFbdDataSettings element found')
+        msg = 'no FastFlimFbdDataSettings element found'
+        raise ValueError(msg)
     return result
 
 
@@ -1842,28 +1854,29 @@ def fbf_read(
         close = False
         fh.seek(0)
     else:
-        raise ValueError(f'cannot open file of type {type(file)}')
+        msg = f'cannot open file of type {type(file)}'
+        raise ValueError(msg)
 
     try:
         try:
             # the first 1024 bytes contain the header
             buffer = fh.read(maxheaderlength).split(b'\x00', 1)[0]
         except ValueError as exc:
-            raise ValueError('invalid FBF header') from exc
+            msg = 'invalid FBF header'
+            raise ValueError(msg) from exc
         header = bytes2str(buffer)
         meta = fbf_parse_header(header)
         if not meta:
-            raise ValueError('failed to parse FBF header')
+            msg = 'failed to parse FBF header'
+            raise ValueError(msg)
         if firmware:
             if len(header) != maxheaderlength:
                 fh.seek(len(header) + 1)
             meta['firmware'] = fh.read()
     finally:
         if close:
-            try:
+            with contextlib.suppress(Exception):
                 fh.close()
-            except Exception:  # noqa: S110
-                pass
     return meta
 
 
@@ -2148,10 +2161,12 @@ def b64_write(
     """Write array of square int16 images to B64 file."""
     data = numpy.asarray(data)
     if data.dtype.char != 'h':
-        raise ValueError(f'invalid data type {data.dtype} (must be int16)')
+        msg = f'{data.dtype=} != int16'
+        raise ValueError(msg)
     # TODO: write carpet
     if data.ndim != 3 or data.shape[1] != data.shape[2]:
-        raise ValueError(f'invalid shape {data.shape}')
+        msg = f'{data.shape=} != (frames, size, size)'
+        raise ValueError(msg)
     with open(filename, 'wb') as fh:
         fh.write(struct.pack('I', data.shape[-1]))
         data.tofile(fh)
@@ -2272,7 +2287,7 @@ def xml2dict(
 
     Parameters:
         xml: XML data to convert.
-        sanitize: Remove prefix from etree Element.
+        sanitize: Remove prefix from etree element.
         prefix: Prefixes for dictionary keys.
         exclude: Ignore element tags.
         sep: Sequence separator.
