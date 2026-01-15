@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.12.12
+:Version: 2026.1.14
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -35,15 +35,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.5
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.12.12 (optional)
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.2 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
 
 Revisions
 ---------
+
+2026.1.14
+
+- Improve code quality.
 
 2025.12.12
 
