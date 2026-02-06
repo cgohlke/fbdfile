@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.1.14
+:Version: 2026.2.6
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -61,16 +61,20 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
 
 Revisions
 ---------
+
+2026.2.6
+
+- Fix code review issues.
 
 2026.1.14
 
@@ -150,7 +154,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.1.14'
+__version__ = '2026.2.6'
 
 __all__ = [
     'FbdFile',
@@ -248,14 +252,14 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                msg = f'{file!r} is not open in binary mode'
+                msg = f'{file=!r} is not open in binary mode'
                 raise TypeError(msg)
 
             self._fh = file
             try:
                 self._fh.tell()
             except Exception as exc:
-                msg = f'{file!r} is not seekable'
+                msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
@@ -271,7 +275,7 @@ class BinaryFile:
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     self._fh.close()
-                msg = f'{file!r} is not seekable'
+                msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
@@ -866,12 +870,12 @@ class FbdFile(BinaryFile):
         """Initialize instance from VistaVision settings file."""
         if self.fbs is None:
             for ext in ('.FBS.XML', '.fbs.xml'):
-                fname = self._path.rsplit('$', 1)[0] + ext
-                if os.path.exists(fname):
+                filename = self._path.rsplit('$', 1)[0] + ext
+                if os.path.exists(filename):
                     break
             else:
                 return False
-            self.fbs = fbs_read(fname)
+            self.fbs = fbs_read(filename)
 
         if self.fbf is None:
             self.fbf = fbf_parse_header(
@@ -892,7 +896,7 @@ class FbdFile(BinaryFile):
         if self.scanner == '':
             try:
                 self.scanner = scn['ScannerInfo']['ScannerID']
-            except IndexError:
+            except KeyError:
                 self.scanner = 'Unknown'
         if self.laser_frequency < 0:
             self.laser_frequency = float(scn['ExcitationFrequency'])
@@ -1004,8 +1008,7 @@ class FbdFile(BinaryFile):
             self.windows = self.fbf.get('windows', windows)
             if self.windows != windows:
                 logger().warning(
-                    'FbdFile: '
-                    'windows mismatch between FBF and FBD header '
+                    'FbdFile: windows mismatch between FBF and FBD header '
                     f'({self.windows!r} != {windows!r})'
                 )
         if self.channels < 0:
@@ -1013,8 +1016,7 @@ class FbdFile(BinaryFile):
             self.channels = self.fbf.get('channels', channels)
             if self.channels != channels:
                 logger().warning(
-                    'FbdFile: '
-                    'channels mismatch between FBF and FBD header '
+                    'FbdFile: channels mismatch between FBF and FBD header '
                     f'({self.channels!r} != {channels!r})'
                 )
         if self.synthesizer == '':
@@ -1090,9 +1092,13 @@ class FbdFile(BinaryFile):
     @property
     def units_per_sample(self) -> float:
         """Number of FLIMbox units per scanner sample."""
+        pmax = self.pmax
+        if pmax <= 1:
+            msg = f'{pmax=!r} <= 1'
+            raise ValueError(msg)
         return float(
             (self.pixel_dwell_time * 1e-6)
-            * (self.pmax / (self.pmax - 1))
+            * (pmax / (pmax - 1))
             * (self.laser_frequency * self.laser_factor)
         )
 
@@ -1536,7 +1542,14 @@ class FbdFile(BinaryFile):
             records = self.decode(**kwargs)
         times, markers = records[-2:]
 
+        if len(markers) < 2:
+            msg = 'not enough markers to detect frames'
+            raise ValueError(msg)
+
         line_time = self.scanner_line_length * self.units_per_sample
+        if line_time <= 0:
+            msg = f'{line_time=!r} <= 0'
+            raise ValueError(msg)
         frame_durations = numpy.ediff1d(times[markers])
 
         frame_markers = []
@@ -1545,6 +1558,8 @@ class FbdFile(BinaryFile):
             line_num = sys.maxsize
             for i, duration in enumerate(frame_durations):
                 lines = duration / line_time
+                if lines <= 0:
+                    continue
                 aspect = self.frame_size / lines
                 if aspect_range[0] < aspect < aspect_range[1]:
                     frame_markers.append(
@@ -1572,6 +1587,9 @@ class FbdFile(BinaryFile):
                 else:
                     cluster_indices.append(len(clusters))
                     clusters.append([d_int, 1])
+            if not clusters:
+                msg = 'no frame duration clusters found'
+                raise ValueError(msg)
             clusters = sorted(clusters, key=lambda x: x[1], reverse=True)
             # possible correction factors, assuming square frame shape
             line_num = self.frame_size
@@ -1661,7 +1679,7 @@ class FbdFile(BinaryFile):
         scanner_shape = scanner_shape[0] + 1, scanner_shape[1]
         # allocate output array of scanner frame shape
         shape = (
-            integrate_frames if integrate_frames else len(frame_markers),
+            integrate_frames or len(frame_markers),
             bins.shape[0],  # channels
             scanner_shape[0] * scanner_shape[1],
             self.pmax // self.pdiv,
@@ -1963,7 +1981,7 @@ def _fbd_decode(
         win = data >> win_shr
     win = decoder_table.take(win, axis=1)
     nophoton = win == -1
-    pmax = (pcc_mask >> pcc_shr + 1) // harmonics
+    pmax = ((pcc_mask >> pcc_shr) + 1) // harmonics
     win *= pmax // windows * harmonics
     pcc = data & pcc_mask  # cross correlation phase
     if pcc_shr:
@@ -1996,6 +2014,9 @@ def _fbd_histogram(
     This implementation is for reference only. Do not use!
 
     """
+    if units_per_sample <= 0:
+        msg = f'{units_per_sample=!r} <= 0'
+        raise ValueError(msg)
     nframes, nchannels, frame_length, nwindows = out.shape
     for i, (j, k) in enumerate(frame_markers):
         f = i % nframes
@@ -2299,7 +2320,7 @@ def xml2dict(
     from collections import defaultdict
     from xml.etree import ElementTree
 
-    at, tx = prefix if prefix else ('', '')
+    at, tx = prefix or ('', '')
     exclude = set() if exclude is None else exclude
 
     def astype(value: Any, /) -> Any:
@@ -2393,8 +2414,8 @@ def indent(*args: Any) -> str:
 
 
 def logger() -> logging.Logger:
-    """Return logger for liffile module."""
-    return logging.getLogger('liffile')
+    """Return logger for fbdfile module."""
+    return logging.getLogger('fbdfile')
 
 
 def askopenfilename(**kwargs: Any) -> str:
