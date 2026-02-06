@@ -148,6 +148,8 @@ def fbd_decode(
         raise ValueError('invalid parameters')
     if swap_words and data.itemsize != 4:
         raise ValueError(f'cannot swap words of {data.itemsize=}')
+    if datasize == 0:
+        return
 
     # calculate cross correlation phase index
     with nogil, parallel(num_threads=num_threads):
@@ -227,8 +229,8 @@ def fbd_histogram(
         scanner_frame_start (int):
             Index of first valid pixel/sample after marker.
         hist_out (numpy.ndarray):
-            Initialized `uint16` array of shape `(number of frames, channels,
-            detected line numbers, frame_size, histogram bins)`,
+            Initialized `uint16` array of shape
+            `(number of frames, channels, frame_size, histogram bins)`,
             where computed histogram will be stored.
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
@@ -238,11 +240,11 @@ def fbd_histogram(
         ssize_t nframes = hist_out.shape[0]
         ssize_t nchannels = hist_out.shape[1]
         ssize_t framelen = hist_out.shape[2]
+        ssize_t nbins = hist_out.shape[3]
         ssize_t nmarkers = frame_markers.shape[0]
         # ssize_t nwindows = hist_out.shape[3]
-        ssize_t i, j, k, f, c, idx
+        ssize_t i, j, k, f, frame, channel, pixel, bin
         times_t t0
-        bins_t w
 
     if bins.shape[0] != hist_out.shape[1]:
         raise ValueError('shape mismatch between bins and hist_out')
@@ -250,23 +252,27 @@ def fbd_histogram(
         raise ValueError('shape mismatch between bins and times')
     if frame_markers.shape[1] != 2:
         raise ValueError(f'{frame_markers.shape[1]=} != 2')
+    if units_per_sample <= 0:
+        raise ValueError('units_per_sample must be positive')
+    if nmarkers == 0:
+        return
 
     with nogil, parallel(num_threads=num_threads):
         for f in range(nmarkers):
             j = frame_markers[f, 0]
             k = frame_markers[f, 1]
-            f = f % nframes
+            frame = f % nframes
             t0 = times[j]
-            for c in prange(nchannels):
+            for channel in prange(nchannels):
                 for i in range(j, k):
-                    idx = <ssize_t>(
+                    pixel = <ssize_t> (
                         <double>(times[i] - t0) / units_per_sample
                         - scanner_frame_start
                     )
-                    if idx >= 0 and idx < framelen:
-                        w = bins[c, i]
-                        if w >= 0:
-                            hist_out[f, c, idx, w] += 1
+                    if pixel >= 0 and pixel < framelen:
+                        bin = <ssize_t> bins[channel, i]
+                        if bin >= 0 and bin < nbins:
+                            hist_out[frame, channel, pixel, bin] += 1
 
 
 cdef:
@@ -351,6 +357,8 @@ def sflim_decode(
 
     if size == 0:
         return
+    if pixeltime == 0:
+        raise ValueError('pixeltime must be positive')
     if sflim.shape[0] != 32 or sflim.shape[1] != 256:
         raise ValueError(
             f'invalid sflim shape {sflim.shape} != (32, 256, height, width)'
@@ -542,10 +550,11 @@ def sflim_decode_photons(
         ssize_t maxphotons = photons.shape[0]
 
     if size == 0:
-        return
+        return 0
     if photons.shape[1] != 5:
         raise ValueError(f'invalid photons shape {photons.shape} != (-1, 5)')
-
+    if pixeltime == 0:
+        raise ValueError('pixeltime must be positive')
     if len(frameshape) != 2 or frameshape[0] < 1 or frameshape[1] < 1:
         raise ValueError('invalid frameshape')
 
