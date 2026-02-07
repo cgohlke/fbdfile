@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2026.1.14
+:Version: 2026.2.6
 
 """
 
@@ -101,9 +101,9 @@ class TestBinaryFile:
     """Test BinaryFile with different file-like inputs."""
 
     def setup_method(self):
-        self.fname = os.path.normpath(DATA / 'binary.bin')
-        if not os.path.exists(self.fname):
-            pytest.skip(f'{self.fname!r} not found')
+        self.filename = os.path.normpath(DATA / 'binary.bin')
+        if not os.path.exists(self.filename):
+            pytest.skip(f'{self.filename!r} not found')
 
     def validate(
         self,
@@ -117,11 +117,11 @@ class TestBinaryFile:
     ) -> None:
         """Assert BinaryFile attributes."""
         if filepath is None:
-            filepath = self.fname
+            filepath = self.filename
         if filename is None:
-            filename = os.path.basename(self.fname)
+            filename = os.path.basename(self.filename)
         if dirname is None:
-            dirname = os.path.dirname(self.fname)
+            dirname = os.path.dirname(self.filename)
         if name is None:
             name = fh.filename
 
@@ -143,24 +143,24 @@ class TestBinaryFile:
 
     def test_str(self):
         """Test BinaryFile with str path."""
-        file = self.fname
+        file = self.filename
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     def test_pathlib(self):
         """Test BinaryFile with pathlib.Path."""
-        file = pathlib.Path(self.fname)
+        file = pathlib.Path(self.filename)
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     def test_open_file(self):
         """Test BinaryFile with open binary file."""
-        with open(self.fname, 'rb') as fh, BinaryFile(fh) as bf:
+        with open(self.filename, 'rb') as fh, BinaryFile(fh) as bf:
             self.validate(bf, closed=False)
 
     def test_bytesio(self):
         """Test BinaryFile with BytesIO."""
-        with open(self.fname, 'rb') as fh:
+        with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
         with BinaryFile(file) as fh:
             self.validate(
@@ -175,19 +175,19 @@ class TestBinaryFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_openfile(self):
         """Test BinaryFile with fsspec OpenFile."""
-        file = fsspec.open(self.fname)
+        file = fsspec.open(self.filename)
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_localfileopener(self):
         """Test BinaryFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.fname) as file, BinaryFile(file) as fh:
+        with fsspec.open(self.filename) as file, BinaryFile(file) as fh:
             self.validate(fh, closed=False)
 
     def test_text_file_fails(self):
         """Test BinaryFile with open text file fails."""
-        with open(self.fname) as fh:  # noqa: SIM117
+        with open(self.filename) as fh:  # noqa: SIM117
             with pytest.raises(TypeError):
                 BinaryFile(fh)
 
@@ -197,7 +197,7 @@ class TestBinaryFile:
         BinaryFile._ext = {'.lif'}
         try:
             with pytest.raises(ValueError):
-                BinaryFile(self.fname)
+                BinaryFile(self.filename)
         finally:
             BinaryFile._ext = ext
 
@@ -238,16 +238,16 @@ class TestBinaryFile:
     def test_invalid_mode(self):
         """Test BinaryFile with invalid mode fails."""
         with pytest.raises(ValueError):
-            BinaryFile(self.fname, mode='ab')
+            BinaryFile(self.filename, mode='ab')
 
 
 class TestFbdFile:
     """Test FbdFile with different file-like inputs."""
 
     def setup_method(self):
-        self.fname = os.path.normpath(DATA / 'CeruleanVenusCell1$CFCO.fbd')
-        if not os.path.exists(self.fname):
-            pytest.skip(f'{self.fname!r} not found')
+        self.filename = os.path.normpath(DATA / 'CeruleanVenusCell1$CFCO.fbd')
+        if not os.path.exists(self.filename):
+            pytest.skip(f'{self.filename!r} not found')
 
     def validate(self, fbd: FbdFile) -> None:
         # assert FbdFile attributes
@@ -301,19 +301,19 @@ class TestFbdFile:
 
     def test_str(self):
         """Test FbdFile with str path."""
-        file = self.fname
+        file = self.filename
         with FbdFile(file) as fbd:
             self.validate(fbd)
 
     def test_pathlib(self):
         """Test FbdFile with pathlib.Path."""
-        file = pathlib.Path(self.fname)
+        file = pathlib.Path(self.filename)
         with FbdFile(file) as fbd:
             self.validate(fbd)
 
     def test_bytesio(self):
         """Test FbdFile with BytesIO."""
-        with open(self.fname, 'rb') as fh:
+        with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
         with FbdFile(file, code='CFCO') as fbd:
             self.validate(fbd)
@@ -321,7 +321,7 @@ class TestFbdFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_openfile(self):
         """Test FbdFile with fsspec OpenFile."""
-        file = fsspec.open(self.fname)
+        file = fsspec.open(self.filename)
         with FbdFile(file) as fbd:
             self.validate(fbd)
         file.close()
@@ -329,33 +329,33 @@ class TestFbdFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_localfileopener(self):
         """Test FbdFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.fname) as file, FbdFile(file) as fbd:
+        with fsspec.open(self.filename) as file, FbdFile(file) as fbd:
             self.validate(fbd)
 
 
 def test_fbd_error():
     """Test FbdFile errors."""
-    fname = DATA / 'flimbox_firmware.fbf'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'flimbox_firmware.fbf'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
     with pytest.raises(FileNotFoundError):
         FbdFile('nonexistingfile.fbd')
     with pytest.raises(ValueError):
-        FbdFile(fname)
+        FbdFile(filename)
 
 
 def test_fbd_cbco_b2w8c2():
     """Test read CBCO b2w8c2 FBD file."""
     # SimFCS 16-bit with code settings; does not correctly decode image
-    fname = DATA / 'flimbox_data$CBCO.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'flimbox_data$CBCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FbdFile(fname) as fbd:
+    with FbdFile(filename) as fbd:
         assert str(fbd).startswith("<FbdFile 'flimbox_data$CBCO.fbd'>")
-        assert fbd.filename == os.path.basename(fname)
-        assert fbd.dirname == os.path.dirname(fname)
+        assert fbd.filename == os.path.basename(filename)
+        assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
         assert fbd.filehandle
         assert fbd.header is None
@@ -426,14 +426,14 @@ def test_fbd_cbco_b2w8c2():
 def test_fbd_cfco_b2w8c2():
     """Test read CFCO b2w8c2 FBD file."""
     # SimFCS 16-bit with correct code settings
-    fname = DATA / 'CeruleanVenusCell1$CFCO.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FbdFile(fname) as fbd:
+    with FbdFile(filename) as fbd:
         assert str(fbd).startswith("<FbdFile 'CeruleanVenusCell1$CFCO.fbd'>")
-        assert fbd.filename == os.path.basename(fname)
-        assert fbd.dirname == os.path.dirname(fname)
+        assert fbd.filename == os.path.basename(filename)
+        assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
         assert fbd.filehandle
         assert fbd.header is None
@@ -501,14 +501,14 @@ def test_fbd_cfco_b2w8c2():
 def test_fbd_xx2x_b4w16c4t10():
     """Test read XX2X b4w16c4t10 FBD file."""
     # ISS VistaVision 32-bit with external fbs.xml settings
-    fname = DATA / 'IFLItest/303 Cu6 vs FL$XX2X.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'IFLItest/303 Cu6 vs FL$XX2X.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FbdFile(fname) as fbd:
+    with FbdFile(filename) as fbd:
         assert str(fbd).startswith("<FbdFile '303 Cu6 vs FL$XX2X.fbd'>")
-        assert fbd.filename == os.path.basename(fname)
-        assert fbd.dirname == os.path.dirname(fname)
+        assert fbd.filename == os.path.basename(filename)
+        assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
         assert fbd.filehandle
         assert fbd.header is None
@@ -589,16 +589,16 @@ def test_fbd_xx2x_b4w16c4():
     """Test read XX2X b4w16c4 FBD file."""
     # ISS VistaVision 32-bit with external fbs.xml settings
     # https://github.com/cgohlke/lfdfiles/issues/1
-    fname = DATA / 'b4w16c4/E5+17+32M-20MHz-cell1$XX2X.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'b4w16c4/E5+17+32M-20MHz-cell1$XX2X.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FbdFile(fname) as fbd:
+    with FbdFile(filename) as fbd:
         assert str(fbd).startswith(
             "<FbdFile 'E5+17+32M-20MHz-cell1$XX2X.fbd'>"
         )
-        assert fbd.filename == os.path.basename(fname)
-        assert fbd.dirname == os.path.dirname(fname)
+        assert fbd.filename == os.path.basename(filename)
+        assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
         assert fbd.filehandle
         assert fbd.header is None
@@ -668,19 +668,19 @@ def test_fbd_xx2x_b4w16c4():
 def test_fbd_ei0t_b4w8c4():
     """Test read EI0T b4w8c4 FBD file."""
     # SimFCS 32-bit with header settings; override pixel_dwell_time
-    fname = (
+    filename = (
         DATA
         / 'PhasorPy/60xw850fov48p30_cell3_nucb_mitogr_actinor_40f000$ei0t.fbd'
     )
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FbdFile(fname, pixel_dwell_time=20.0) as fbd:
+    with FbdFile(filename, pixel_dwell_time=20.0) as fbd:
         assert str(fbd).startswith(
             "<FbdFile '60xw850fov48p30_cell3_nucb_mitogr_actinor_40f000$ei0t"
         )
-        assert fbd.filename == os.path.basename(fname)
-        assert fbd.dirname == os.path.dirname(fname)
+        assert fbd.filename == os.path.basename(filename)
+        assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
         assert fbd.filehandle
         assert fbd.header['pixel_dwell_time_index'] == 0
@@ -752,11 +752,11 @@ def test_fbd_ei0t_b4w8c4():
 
 def test_fbd_bytesio():
     """Test read FBD from BytesIO."""
-    fname = DATA / 'CeruleanVenusCell1$CFCO.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with open(fname, 'rb') as fh:
+    with open(filename, 'rb') as fh:
         data = io.BytesIO(fh.read())
 
     with FbdFile(data, code='CFCO') as fbd:
@@ -800,16 +800,16 @@ def test_fbd_bytesio():
 @pytest.mark.parametrize('bytesio', [False, True])
 def test_read_fbf(bytesio):
     """Test read FBF file."""
-    fname = DATA / 'flimbox_firmware.fbf'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'flimbox_firmware.fbf'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
     if bytesio:
-        with open(fname, 'rb') as fh:
+        with open(filename, 'rb') as fh:
             data = io.BytesIO(fh.read())
         fbf = fbf_read(data, firmware=True)
     else:
-        fbf = fbf_read(fname, firmware=True)
+        fbf = fbf_read(filename, firmware=True)
 
     assert fbf['extclk']
     assert fbf['channels'] == 2
@@ -827,16 +827,16 @@ def test_read_fbf(bytesio):
 @pytest.mark.parametrize('stringio', [False, True])
 def test_read_fbs(stringio):
     """Test read FBS file."""
-    fname = DATA / 'FBS/TESTFILE.fbs.xml'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'FBS/TESTFILE.fbs.xml'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
     if stringio:
-        with open(fname, encoding='utf-8') as fh:
+        with open(filename, encoding='utf-8') as fh:
             data = io.StringIO(fh.read())
         fbs = fbs_read(data)
     else:
-        fbs = fbs_read(fname)
+        fbs = fbs_read(filename)
 
     assert fbs['Comments'].startswith(
         'File created by ISS Vista software (Version: 4.2.597.0)'
@@ -856,11 +856,11 @@ def test_read_fbs(stringio):
 
 def test_sflim_decode():
     """Test sflim_decode and sflim_decode_photons functions."""
-    fname = DATA / '20210123488_100x_NSC_166_TMRM_4_zoom4000_L115.bin'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / '20210123488_100x_NSC_166_TMRM_4_zoom4000_L115.bin'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    data = numpy.fromfile(fname, dtype=numpy.uint32)
+    data = numpy.fromfile(filename, dtype=numpy.uint32)
     frequency = 78e6
     frequency_factor = 0.9976
     dwelltime = 16e-6
@@ -884,12 +884,12 @@ def test_sflim_decode():
 
 def test_fbd_to_b64():
     """Test fbd_to_b64 function."""
-    fname = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
     fbd_to_b64(
-        fname,
+        filename,
         '{filename}_c{channel:02}t{frame:04}.b64',
         integrate_frames=1,
         square_frame=True,
@@ -944,12 +944,12 @@ def test_xml2dict():
 
 
 @pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
-def test_lfdfiles():
-    """Test lfdfiles.FlimboxFbd class docstring."""
+def test_lfdfiles_doctest():
+    """Test lfdfiles.FlimboxFbd class doctest."""
     from lfdfiles import FlimboxFbd
 
-    fname = DATA / 'flimbox_data$CBCO.fbd'
-    with FlimboxFbd(fname) as f:
+    filename = DATA / 'flimbox_data$CBCO.fbd'
+    with FlimboxFbd(filename) as f:
         bins, times, markers = f.decode(word_count=500000, skip_words=1900000)
         hist = [numpy.bincount(b[b >= 0]) for b in bins]
 
@@ -966,11 +966,11 @@ def test_lfdfiles_fbd():
     """Test lfdfiles.FlimboxFbd class."""
     from lfdfiles import FlimboxFbd
 
-    fname = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FlimboxFbd(fname, laser_factor=0.99168) as fbd:
+    with FlimboxFbd(filename, laser_factor=0.99168) as fbd:
         str(fbd)
         assert fbd.decoder == '_b2w4c2'
         assert fbd.laser_factor == 0.99168
@@ -1005,11 +1005,11 @@ def test_lfdfiles_fbf():
     """Test lfdfiles.FlimboxFbf class."""
     from lfdfiles import FlimboxFbf
 
-    fname = DATA / 'flimbox_firmware.fbf'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'flimbox_firmware.fbf'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FlimboxFbf(fname, firmware=True) as fbf:
+    with FlimboxFbf(filename, firmware=True) as fbf:
         assert fbf['extclk']
         assert fbf['channels'] == 2
         assert fbf['windows'] == 16
@@ -1028,11 +1028,11 @@ def test_lfdfiles_fbs():
     """Test lfdfiles.FlimboxFbs class."""
     from lfdfiles import FlimboxFbs
 
-    fname = DATA / 'FBS/TESTFILE.fbs.xml'
-    if not os.path.exists(fname):
-        pytest.skip(f'{fname!r} not found')
+    filename = DATA / 'FBS/TESTFILE.fbs.xml'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
 
-    with FlimboxFbs(fname) as fbs:
+    with FlimboxFbs(filename) as fbs:
         str(fbs)
         assert fbs['Comments'].startswith(
             'File created by ISS Vista software (Version: 4.2.597.0)'
@@ -1106,34 +1106,34 @@ def test_phasorpy():
 
 
 @pytest.mark.parametrize(
-    'fname', glob.glob('**/*.fbf', root_dir=DATA, recursive=True)
+    'filename', glob.glob('**/*.fbf', root_dir=DATA, recursive=True)
 )
-def test_glob_fbf(fname):
+def test_glob_fbf(filename):
     """Test read all FBF files."""
-    if 'defective' in fname:
+    if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    fbf_read(DATA / fname)
+    fbf_read(DATA / filename)
 
 
 @pytest.mark.parametrize(
-    'fname', glob.glob('**/*.fbs.xml', root_dir=DATA, recursive=True)
+    'filename', glob.glob('**/*.fbs.xml', root_dir=DATA, recursive=True)
 )
-def test_glob_fbs(fname):
+def test_glob_fbs(filename):
     """Test read all FBS files."""
-    if 'defective' in fname:
+    if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    fbs_read(DATA / fname)
+    fbs_read(DATA / filename)
 
 
 @pytest.mark.parametrize(
-    'fname', glob.glob('**/*.fbd', root_dir=DATA, recursive=True)
+    'filename', glob.glob('**/*.fbd', root_dir=DATA, recursive=True)
 )
-def test_glob_fbd(fname):
+def test_glob_fbd(filename):
     """Test read all FBD files."""
-    if 'defective' in fname:
+    if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    fname = DATA / fname
-    with FbdFile(fname) as fbd:
+    filename = DATA / filename
+    with FbdFile(filename) as fbd:
         str(fbd)
         fbd.decode()
         fbd.asimage(None, None)
