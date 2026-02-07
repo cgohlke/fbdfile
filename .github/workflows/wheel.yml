@@ -12,7 +12,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         python-version: ["3.14"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: pypa/cibuildwheel@v3.3.1
         env:
           # MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -27,10 +27,6 @@ jobs:
           CIBW_ARCHS_WINDOWS: AMD64 ARM64 x86
           CIBW_TEST_REQUIRES: numpy
           CIBW_TEST_COMMAND: python -c "import fbdfile;from fbdfile import _fbdfile;print(fbdfile.__version__)"
-      - uses: actions/upload-artifact@v6
-        with:
-          path: ./wheelhouse/*.whl
-          name: wheels-${{ matrix.os }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
@@ -45,3 +41,7 @@ jobs:
         run: |
           cd ..
           python -c "import fbdfile;from fbdfile import _fbdfile;print(fbdfile.__version__)"
+      - uses: actions/upload-artifact@v6
+        with:
+          path: ./wheelhouse/*.whl
+          name: wheels-${{ matrix.os }}
