@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2026.2.6
+:Version: 2026.3.20
 
 """
 
@@ -39,6 +39,7 @@ import os
 import pathlib
 import sys
 import sysconfig
+import warnings
 
 import numpy
 import pytest
@@ -139,7 +140,11 @@ class TestBinaryFile:
         assert fh.filehandle.tell() == 10
         assert fh.filehandle.read(1) == b'\n'
         fh.close()
-        assert fh.closed is closed
+        # underlying filehandle may still be be open if BinaryFile
+        # was given an open filehandle
+        assert fh._fh.closed is closed
+        # BinaryFile always reports itself as closed after close() is called
+        assert fh.closed
 
     def test_str(self):
         """Test BinaryFile with str path."""
@@ -232,7 +237,7 @@ class TestBinaryFile:
             # mock non-file object
             pass
 
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             BinaryFile(File)
 
     def test_invalid_mode(self):
@@ -274,7 +279,7 @@ class TestFbdFile:
 
         image = fbd.asimage((bins, times, markers), (shape, frame_markers))
         assert image.shape == (1, 2, 256, 256, 64)
-        assert image[0, 0, 128, 128].sum() == 347
+        assert image[0, 0, 128, 128].sum() == 337
 
         attrs = fbd.attrs
         assert attrs['name'] == fbd.name
@@ -423,6 +428,110 @@ def test_fbd_cbco_b2w8c2():
             imshow(image[:, 0].sum(-1, dtype=numpy.uint32), show=True)
 
 
+def test_fbd_cbco_b2w8c2_override():
+    """Test read CBCO b2w8c2 FBD file with overridden pixel_dwell_time."""
+    # pixel_dwell_time=0.937 (= 4.0 * 0.23425) is the correct value for this
+    # file; the code table maps 'O'/'B' to 4.0 µs which is wrong.
+    # Supplying the known dwell time and refine=False suppresses all warnings.
+    filename = DATA / 'flimbox_data$CBCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename, pixel_dwell_time=0.937) as fbd:
+        assert fbd.pixel_dwell_time == 0.937
+        assert fbd.laser_factor == 1.0
+
+        bins, times, markers = fbd.decode(
+            word_count=500000, skip_words=1900000
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            shape, frame_markers = fbd.frames(
+                (bins, times, markers),
+                select_frames=slice(None),
+                aspect_range=(0.8, 1.2),
+                frame_cluster=0,
+                refine=False,
+            )
+
+        assert shape == (256, 266)
+        assert frame_markers.tolist() == [[44097, 124814]]
+
+        image = fbd.asimage(
+            (bins, times, markers),
+            (shape, frame_markers),
+            integrate_frames=1,
+            square_frame=True,
+        )
+        assert image.shape == (1, 2, 256, 256, 64)
+        assert image.dtype == numpy.uint16
+        counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
+        assert counts.tolist() == [72988, 0]
+
+
+def test_fbd_ec0z_b2w4c2():
+    """Test read EC0Z b2w4c2 FBD file."""
+    # SimFCS 16-bit with header; pixel_dwell_time is computed from the
+    # header frame_time (25.1175 us); the physical scanner does 257 lines
+    # per frame. refine_settings makes a ~0.001% laser_factor adjustment
+    # but leaves units_per_sample essentially unchanged (~1014.5).
+    filename = (
+        DATA / 'calibration_coumarin6_EtOH_25xNA1p4oil_780nm_'
+        '2lzrpwr06282021POSTEXP$EC0Z.fbd'
+    )
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename) as fbd:
+        assert fbd.code == 'EC0Z'
+        assert fbd.frame_size == 256
+        assert fbd.windows == 4
+        assert fbd.channels == 2
+        assert fbd.harmonics == 2
+        assert fbd.decoder == '_b2w4c2'
+        assert (
+            fbd.pixel_dwell_time == 25.1175
+        )  # computed from header frame_time
+        assert fbd.laser_factor == 1.00187
+        assert fbd.scanner_line_length == 600
+        assert fbd.scanner_line_start == 0
+        assert fbd.scanner == 'Zeiss LSM710'
+        assert not fbd.is_32bit
+
+        bins, times, markers = fbd.decode()
+        assert bins.shape == (2, 104843272)
+        assert times[:2].tolist() == [0, 1024]
+        assert markers.shape == (32,)
+        assert markers[0] == 237992
+
+        # default refine=True makes a ~0.001% laser_factor adjustment (noise)
+        # below the 1/frame_size threshold, so no warning should be raised
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            shape, fm = fbd.frames((bins, times, markers))
+        # 257 physical lines (one extra overhead line), frame_size=256
+        assert shape == (257, 600)
+        assert len(fm) == 15
+        # units_per_sample stays ~1014.5; change is ~0.001%, not a correction
+        assert abs(fbd.laser_factor - 1.00187) < 1e-4
+
+        image = fbd.asimage((bins, times, markers), (shape, fm))
+        assert image.shape == (1, 2, 256, 256, 64)
+        counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
+        assert counts.tolist() == [55279245, 46940367]
+
+    # refine=False: no warnings, same shape and frame count
+    with FbdFile(filename) as fbd:
+        bins, times, markers = fbd.decode()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            shape, fm = fbd.frames((bins, times, markers), refine=False)
+        assert shape == (257, 600)
+        assert len(fm) == 15
+        assert fbd.laser_factor == 1.00187  # unchanged
+
+
 def test_fbd_cfco_b2w8c2():
     """Test read CFCO b2w8c2 FBD file."""
     # SimFCS 16-bit with correct code settings
@@ -490,12 +599,31 @@ def test_fbd_cfco_b2w8c2():
         )
         assert image.shape == (29, 2, 256, 256, 64)
         assert image.dtype == numpy.uint16
-        assert image[0, 0, 128, 128].sum() == 7
+        assert image[0, 0, 128, 128].sum() == 11
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [2973148, 2642822]
+        assert counts.tolist() == [2973294, 2643017]
 
         if SHOW:
             imshow(image.sum(-1, dtype=numpy.uint32), show=True)
+
+
+def test_fbd_xx2x_unknown_code():
+    """Test that XX2X without fbs.xml raises FbdFileError for unknown code."""
+    # Without an accompanying .fbs.xml, code[0]='X' is not in _frame_size
+    # and should raise FbdFileError instead of a bare KeyError.
+    filename = DATA / 'IFLItest/303 Cu6 vs FL$XX2X.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    import io
+
+    with open(filename, 'rb') as f:
+        data = io.BytesIO(f.read())
+    data.name = filename.name  # type: ignore[attr-defined]
+
+    # Open from BytesIO so no .fbs.xml is discovered on disk
+    with pytest.raises(FbdFileError, match="unknown frame size code 'X'"):
+        FbdFile(data)
 
 
 def test_fbd_xx2x_b4w16c4t10():
@@ -566,9 +694,9 @@ def test_fbd_xx2x_b4w16c4t10():
         )
         assert image.shape == (38, 4, 256, 256, 64)
         assert image.dtype == numpy.uint16
-        assert image[0:, 0, 250, 10].sum(axis=(0, -1)) == 70
+        assert image[0:, 0, 250, 10].sum(axis=(0, -1)) == 72
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [693632, 0, 0, 0]
+        assert counts.tolist() == [693794, 0, 0, 0]
 
         # integrate frames
         image = fbd.asimage(
@@ -579,7 +707,7 @@ def test_fbd_xx2x_b4w16c4t10():
         )
         assert image.shape == (1, 4, 256, 256, 64)
         assert image.dtype == numpy.uint16
-        assert image[0, 0, 250, 10].sum() == 70
+        assert image[0, 0, 250, 10].sum() == 72
 
         if SHOW:
             imshow(image[:, 0].sum(-1, dtype=numpy.uint32), show=True)
@@ -643,7 +771,7 @@ def test_fbd_xx2x_b4w16c4():
             aspect_range=(0.8, 1.2),
             frame_cluster=0,
         )
-        assert shape == (257, 313)
+        assert shape == (257, 313)  # 257 physical scan lines (one overhead)
         assert len(frame_markers) == 20
         assert frame_markers[0].tolist() == [18027, 203143]
         assert frame_markers[-1].tolist() == [3543838, 3728760]
@@ -659,7 +787,7 @@ def test_fbd_xx2x_b4w16c4():
         assert image.dtype == numpy.uint16
         assert image[0, 1, 128, 128].sum() == 11
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [0, 2180641, 0, 593033]
+        assert counts.tolist() == [0, 2180677, 0, 593044]
 
         if SHOW:
             imshow(image[:, 1].sum(-1, dtype=numpy.uint32), show=True)
@@ -750,6 +878,128 @@ def test_fbd_ei0t_b4w8c4():
             )
 
 
+def test_fbd_ei0t_auto_refine():
+    """Test refine_settings and refine for EI0T."""
+    filename = (
+        DATA / 'PhasorPy' / '60xw850fov48p30_cell3_nucb_mitogr_actinor'
+        '_40f000$ei0t.fbd'
+    )
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    # header-derived dwell (31.875) already passes aspect check,
+    # so refine is a no-op — verify frames still works
+    with FbdFile(filename) as fbd:
+        original_dwell = fbd.pixel_dwell_time
+        records = fbd.decode()
+        shape, fm = fbd.frames(records, refine=True)
+        assert fbd.pixel_dwell_time == original_dwell
+        assert shape == (257, 404)  # 257 physical scan lines (one overhead)
+        assert len(fm) == 40
+
+    # user-supplied dwell is protected: refine_settings does not search
+    # the table and emits a "no valid frames" warning instead
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        records = fbd.decode()
+        assert not fbd._pixel_dwell_time_from_table
+        with pytest.warns(UserWarning, match='does not produce valid frames'):
+            fbd.refine_settings(records)
+        assert fbd.pixel_dwell_time == 100.0  # unchanged
+
+    # table-derived dwell can be corrected: simulate by setting the flag
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        records = fbd.decode()
+        original_factor = fbd.laser_factor
+        with pytest.warns(UserWarning, match='pixel_dwell_time changed'):
+            fbd.refine_settings(records)
+        assert fbd.pixel_dwell_time == 32.0
+        assert fbd.laser_factor != original_factor
+
+    # table-derived dwell corrected via frames() refine
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        records = fbd.decode()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            shape, fm = fbd.frames(records, refine=True)
+        assert fbd.pixel_dwell_time == 32.0
+        assert shape == (256, 404)
+        assert len(fm) == 40
+
+    # table-derived dwell corrected via asimage() refine
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            image = fbd.asimage(
+                refine=True,
+                integrate_frames=0,
+                square_frame=False,
+            )
+        assert fbd.pixel_dwell_time == 32.0
+        assert image.shape == (40, 4, 257, 404, 64)
+        counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
+        assert counts.tolist() == [1473312, 960165, 870617, 0]
+
+    # refine=False skips refinement: bad dwell is not corrected
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        records = fbd.decode()
+        with pytest.warns(UserWarning, match='no frames detected'):
+            fbd.frames(records, refine=False)
+        assert fbd.pixel_dwell_time == 100.0  # unchanged
+
+    # refine=None corrects bad dwell only when no frames detected
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        records = fbd.decode()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            shape, fm = fbd.frames(records, refine=None)
+        assert fbd.pixel_dwell_time == 32.0
+        assert shape == (256, 404)
+        assert len(fm) == 40
+
+    # refine=None is a no-op when frames already detected (good dwell)
+    with FbdFile(filename) as fbd:
+        original_dwell = fbd.pixel_dwell_time
+        original_factor = fbd.laser_factor
+        records = fbd.decode()
+        shape, fm = fbd.frames(records, refine=None)
+        assert fbd.pixel_dwell_time == original_dwell
+        assert fbd.laser_factor == original_factor
+        assert shape == (257, 404)  # 257 physical scan lines (one overhead)
+
+    # refine_settings return values
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        fbd._pixel_dwell_time_from_table = True
+        records = fbd.decode()
+        # changing settings returns True
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = fbd.refine_settings(records)
+        assert result is True
+
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        records = fbd.decode()
+        # no valid frames with non-table source: returns None
+        with pytest.warns(UserWarning, match='does not produce valid frames'):
+            result = fbd.refine_settings(records)
+        assert result is None
+
+    with FbdFile(filename) as fbd:
+        records = fbd.decode()
+        # converges to False (settings already optimal)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            for _ in range(10):
+                result = fbd.refine_settings(records)
+                if result is False:
+                    break
+        assert result is False
+
+
 def test_fbd_bytesio():
     """Test read FBD from BytesIO."""
     filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
@@ -789,12 +1039,71 @@ def test_fbd_bytesio():
         image = fbd.asimage(integrate_frames=1, square_frame=True)
         assert image.shape == (1, 2, 256, 256, 64)
         assert image.dtype == numpy.uint16
-        assert image[0, 0, 128, 128].sum() == 347
+        assert image[0, 0, 128, 128].sum() == 337
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [2973148, 2642822]
+        assert counts.tolist() == [2973294, 2643017]
 
         if SHOW:
             imshow(image.sum(-1, dtype=numpy.uint32), show=True)
+
+
+def test_fbd_cc0z_b2w4c2():
+    """Test CC0Z b2w4c2 FBD file with auto laser_factor refinement."""
+    # Fix #1: units_per_sample captured after frames() may update laser_factor.
+    # Fix #2: integrate_frames exceeding frame count raises ValueError.
+    # Fix #3: square_frame=True warns when detected line_num < frame_size.
+    filename = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename) as fbd:
+        # header has slightly wrong laser_factor; frames() should refine it
+        assert fbd.header['laser_factor'] == pytest.approx(0.9955791)
+        initial_factor = fbd.laser_factor
+
+        records = fbd.decode()
+        _bins, _times, markers = records
+        assert markers.shape == (26,)
+
+        with pytest.warns(UserWarning, match='laser_factor changed'):
+            frames = fbd.frames(records)
+
+        # Fix #1: after frames(), laser_factor has been auto-refined
+        assert fbd.laser_factor != initial_factor
+        assert fbd.laser_factor == pytest.approx(0.99167, rel=1e-3)
+
+        # Fix #1: asimage uses units_per_sample captured after frames() so the
+        # histogram must match the reference value for the corrected factor
+        image = fbd.asimage(
+            records, frames, integrate_frames=1, square_frame=True
+        )
+        assert image.shape == (1, 2, 256, 256, 64)
+        assert image.sum(dtype=numpy.uint64) == 4293221
+
+        # Fix #2: integrate_frames > len(frame_markers) raises ValueError
+        _, frame_markers = frames
+        assert len(frame_markers) == 25
+        with pytest.raises(ValueError, match='integrate_frames='):
+            fbd.asimage(
+                records,
+                frames,
+                integrate_frames=len(frame_markers) + 1,
+            )
+
+        # Fix #3: square_frame=True warns when detected line_num < frame_size;
+        # use empty records and zero-frame markers so fbd_histogram is a no-op
+        empty_records = fbd.decode(word_count=0)
+        partial_frames = (
+            (100, fbd.scanner_line_length),
+            numpy.empty((0, 2), dtype=numpy.intp),
+        )
+        with pytest.warns(UserWarning, match='detected 100 lines'):
+            fbd.asimage(
+                empty_records,
+                partial_frames,
+                integrate_frames=0,
+                square_frame=True,
+            )
 
 
 @pytest.mark.parametrize('bytesio', [False, True])
@@ -895,7 +1204,7 @@ def test_fbd_to_b64():
         square_frame=True,
         pdiv=-1,
         laser_frequency=-1,
-        laser_factor=0.99168,
+        laser_factor=0.99167,
         pixel_dwell_time=-1.0,
         frame_size=-1,
         scanner_line_length=-1,
@@ -909,7 +1218,7 @@ def test_fbd_to_b64():
         with SimfcsB64(
             DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd_c00t0000.b64'
         ) as b64:
-            assert b64.asarray().sum(dtype=numpy.int32) == 4287217  # 4312585
+            assert b64.asarray().sum(dtype=numpy.int32) == 4293221  # 4312585
         with SimfcsB64(
             DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd_c01t0000.b64'
         ) as b64:
@@ -970,12 +1279,12 @@ def test_lfdfiles_fbd():
     if not os.path.exists(filename):
         pytest.skip(f'{filename!r} not found')
 
-    with FlimboxFbd(filename, laser_factor=0.99168) as fbd:
+    with FlimboxFbd(filename, laser_factor=0.99167) as fbd:
         str(fbd)
         assert fbd.decoder == '_b2w4c2'
-        assert fbd.laser_factor == 0.99168
+        assert fbd.laser_factor == 0.99167
         assert fbd.laser_frequency == 40000000.0
-        assert fbd.pixel_dwell_time == 25.21
+        assert fbd.pixel_dwell_time == 25.21  # computed from header frame_time
         assert fbd.header['laser_factor'] == 0.9955791
 
         bins, times, markers = fbd.decode()
@@ -991,7 +1300,7 @@ def test_lfdfiles_fbd():
         image = fbd.asimage((bins, times, markers), None)
         assert image.shape == (1, 2, 256, 256, 64)
         assert image.dtype == numpy.uint16
-        assert image.sum(dtype=numpy.uint64) == 4287217
+        assert image.sum(dtype=numpy.uint64) == 4293221
 
         with pytest.raises(AttributeError):
             _ = fbd.non_existent
@@ -1058,7 +1367,7 @@ def test_phasorpy():
 
     filename = fetch('Convallaria_$EI0S.fbd')
     signal = signal_from_fbd(filename, channel=None, keepdims=True)
-    assert signal.values.sum(dtype=numpy.uint64) == 9310275
+    assert signal.values.sum(dtype=numpy.uint64) == 9295075
     assert signal.dtype == numpy.uint16
     assert signal.shape == (9, 2, 256, 256, 64)
     assert signal.dims == ('T', 'C', 'Y', 'X', 'H')
@@ -1075,7 +1384,7 @@ def test_phasorpy():
     assert 'flimbox_settings' not in attrs
 
     signal = signal_from_fbd(filename, frame=-1, channel=0, keepdims=True)
-    assert signal.values.sum(dtype=numpy.uint64) == 9310275
+    assert signal.values.sum(dtype=numpy.uint64) == 9295075
     assert signal.shape == (1, 1, 256, 256, 64)
     assert signal.dims == ('T', 'C', 'Y', 'X', 'H')
 
@@ -1085,12 +1394,12 @@ def test_phasorpy():
     assert signal.dims == ('Y', 'X', 'H')
 
     signal = signal_from_fbd(filename, frame=1, channel=0, keepdims=False)
-    assert signal.values.sum(dtype=numpy.uint64) == 1033137
+    assert signal.values.sum(dtype=numpy.uint64) == 1031723
     assert signal.shape == (256, 256, 64)
     assert signal.dims == ('Y', 'X', 'H')
 
     signal = signal_from_fbd(filename, frame=1, channel=0, keepdims=True)
-    assert signal.values.sum(dtype=numpy.uint64) == 1033137
+    assert signal.values.sum(dtype=numpy.uint64) == 1031723
     assert signal.shape == (1, 1, 256, 256, 64)
     assert signal.dims == ('T', 'C', 'Y', 'X', 'H')
 
@@ -1133,7 +1442,13 @@ def test_glob_fbd(filename):
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
     filename = DATA / filename
-    with FbdFile(filename) as fbd:
+    try:
+        fbd = FbdFile(filename)
+    except FbdFileError as exc:
+        if 'unknown frame size code' in str(exc):
+            pytest.xfail(reason=str(exc))
+        raise
+    with fbd:
         str(fbd)
         fbd.decode()
         fbd.asimage(None, None)
@@ -1142,10 +1457,10 @@ def test_glob_fbd(filename):
 
 
 @pytest.mark.skipif(
-    not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.12'
+    not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.13'
 )
 def test_gil_enabled():
-    """Test that GIL is disabled on thread-free Python."""
+    """Test that GIL state is consistent with build configuration."""
     assert sys._is_gil_enabled() != sysconfig.get_config_var('Py_GIL_DISABLED')
 
 
