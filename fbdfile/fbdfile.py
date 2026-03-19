@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.6
+:Version: 2026.3.20
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -61,16 +61,29 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
 
 Revisions
 ---------
+
+2026.3.20
+
+- Frames and asimage methods always refine laser_factor by default (breaking).
+- Add tri-state refine option to frames and asimage methods.
+- Add refine_settings method to refine pixel_dwell_time and laser_factor.
+- Add more decoder settings (not tested).
+- Fix decode to read all bytes from streams and fix skip/count guard.
+- Fix cluster-to-frame-marker mapping in frames fallback path.
+- Fix from_fbs header detection to use fbf_parse_header.
+- Fix decoder_settings to not swallow errors from valid decoders.
+- Use fbd_decode return value to trim markers array.
+- Drop support for Python 3.11.
 
 2026.2.6
 
@@ -111,7 +124,7 @@ Notes
 
 The API is not stable yet and might change between revisions.
 
-Python <= 3.10 is no longer supported. 32-bit versions are deprecated.
+Python <= 3.11 is no longer supported. 32-bit versions are deprecated.
 
 The latest Microsoft Visual C++ Redistributable for Visual Studio 2015-2022
 is required on Windows.
@@ -133,10 +146,11 @@ Examples
 
 Read a FLIM lifetime image and metadata from an FBD file:
 
->>> with FbdFile('tests/data/flimbox_data$CBCO.fbd') as fbd:
+>>> with FbdFile(
+...     'tests/data/flimbox_data$CBCO.fbd', pixel_dwell_time=0.937
+... ) as fbd:
 ...     bins, times, markers = fbd.decode()
 ...     image = fbd.asimage()
-...
 >>> image.shape
 (1, 2, 256, 256, 64)
 >>> print(bins[0, :2], times[:2], markers[:2])
@@ -154,7 +168,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.2.6'
+__version__ = '2026.3.20'
 
 __all__ = [
     'FbdFile',
@@ -177,7 +191,7 @@ import struct
 import sys
 import warnings
 from functools import cached_property
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import TYPE_CHECKING, ClassVar, final, override
 
 if TYPE_CHECKING:
     from collections.abc import Container, Sequence
@@ -202,13 +216,16 @@ class BinaryFile:
         file:
             File name or seekable binary stream.
         mode:
-            File open mode if `file` is a file name.
-            The default is 'r'. Files are always opened in binary mode.
+            File open mode if ``file`` is a file name.
+            If not specified, defaults to ``'r'``. Files are always opened
+            in binary mode.
 
     Raises:
+        TypeError:
+            File is a text stream, or an unsupported type.
         ValueError:
             Invalid file name, extension, or stream.
-            File is not a binary or seekable stream.
+            File stream is not seekable.
 
     """
 
@@ -241,8 +258,9 @@ class BinaryFile:
                 mode = 'r'
             else:
                 if mode[-1:] == 'b':
+                    # accept 'rb'/'r+b'
                     mode = mode[:-1]  # type: ignore[assignment]
-                if mode not in {'r', 'r+'}:
+                if mode not in ('r', 'r+'):
                     msg = f'invalid {mode=!r}'
                     raise ValueError(msg)
             self._path = os.path.abspath(file)
@@ -252,7 +270,9 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                msg = f'{file=!r} is not open in binary mode'
+                msg = (  # type: ignore[unreachable]
+                    f'{file=!r} is not open in binary mode'
+                )
                 raise TypeError(msg)
 
             self._fh = file
@@ -262,9 +282,9 @@ class BinaryFile:
                 msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
-                self._path = os.path.normpath(file.path)
+                self._path = os.path.abspath(file.path)
             elif hasattr(file, 'name'):
-                self._path = os.path.normpath(file.name)
+                self._path = os.path.abspath(file.name)
 
         elif hasattr(file, 'open'):
             # fsspec OpenFile
@@ -278,20 +298,18 @@ class BinaryFile:
                 msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
-                self._path = os.path.normpath(file.path)
+                self._path = os.path.abspath(file.path)
 
         else:
             msg = f'cannot handle {type(file)=}'
-            raise ValueError(msg)
+            raise TypeError(msg)
 
         if hasattr(file, 'name') and file.name:
             self._name = os.path.basename(file.name)
         elif self._path:
             self._name = os.path.basename(self._path)
-        elif isinstance(file, io.BytesIO):
-            self._name = 'BytesIO'
-        # else:
-        #     self._name = f'{type(file)}'
+        else:
+            self._name = type(file).__name__
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -300,17 +318,17 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Path to file."""
+        """Absolute path to file, or empty string if unavailable."""
         return self._path
 
     @property
     def filename(self) -> str:
-        """Name of file or empty if binary stream."""
+        """Name of file, or empty if no path is available."""
         return os.path.basename(self._path)
 
     @property
     def dirname(self) -> str:
-        """Directory containing file or empty if binary stream."""
+        """Directory containing file, or empty if no path is available."""
         return os.path.dirname(self._path)
 
     @property
@@ -334,12 +352,10 @@ class BinaryFile:
 
     def close(self) -> None:
         """Close file."""
+        self._closed = True  # always report file as closed
         if self._close:
-            try:
-                self._closed = True
+            with contextlib.suppress(Exception):
                 self._fh.close()
-            except Exception:  # noqa: S110
-                pass
 
     def __enter__(self) -> Self:
         return self
@@ -353,9 +369,7 @@ class BinaryFile:
         self.close()
 
     def __repr__(self) -> str:
-        if self._name:
-            return f'<{self.__class__.__name__} {self._name!r}>'
-        return f'<{self.__class__.__name__}>'
+        return f'<{self.__class__.__name__} {self._name!r}>'
 
 
 @final
@@ -370,8 +384,8 @@ class FbdFile(BinaryFile):
     windows, and scanner type are encoded in the last four characters of the
     file name.
     Newer FBD files, where the 3rd character in the file name tag is `0`,
-    start with the first 1kB of the firmware file used for the measurement,
-    followed by 31kB containing a binary record with measurement settings.
+    may contain embedded firmware and measurement headers before the encoded
+    data stream.
     FBD files written by VistaVision are accompanied by FBS.XML setting
     files.
 
@@ -435,7 +449,8 @@ class FbdFile(BinaryFile):
             Number of microseconds the scanner remains at each pixel.
         laser_frequency:
             Laser frequency in Hz.
-            The default is 20000000 Hz, the internal FLIMbox frequency.
+            The default is 20000000 Hz (or 40000000 Hz for second harmonics),
+            the internal FLIMbox frequency.
         laser_factor:
             Factor to correct dwell_time/laser_frequency.
             Use when the scanner clock is not known exactly.
@@ -454,6 +469,7 @@ class FbdFile(BinaryFile):
 
     _ext: ClassVar[set[str]] = {'.fbd'}
     _data_offset: int  # position of raw data in file
+    _effective_header_t: list[tuple[str, str]] | None
 
     header: numpy.recarray[Any, Any] | None
     """File header, if any."""
@@ -808,6 +824,8 @@ class FbdFile(BinaryFile):
         self.synthesizer = synthesizer
         self.is_32bit = False
         self._data_offset = 0
+        self._effective_header_t = None
+        self._pixel_dwell_time_from_table = False
 
         if not self.code:
             match = re.search(
@@ -923,10 +941,11 @@ class FbdFile(BinaryFile):
 
         self._fh.seek(0)
         try:
-            if self._fh.read(32).decode('cp1252').isprintable():
-                # header detected, assume encoded data starts at 33K
+            buf = self._fh.read(1024).split(b'\x00', 1)[0]
+            if fbf_parse_header(bytes2str(buf)):
+                # FBF firmware header detected; encoded data starts at 33K
                 self._data_offset = 33792
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, ValueError):
             pass
         self._fh.seek(0)
         return True
@@ -935,9 +954,23 @@ class FbdFile(BinaryFile):
         """Initialize instance from file name code."""
         code = self.code
         if self.frame_size < 0:
-            self.frame_size = self._frame_size[code[0]]
+            try:
+                self.frame_size = self._frame_size[code[0]]
+            except KeyError:
+                msg = (
+                    f'unknown frame size code {code[0]!r} in {code!r}. '
+                    'Override frame_size and other settings manually.'
+                )
+                raise FbdFileError(msg) from None
         if self.windows < 0 or self.channels < 0 or self.harmonics < 0:
-            windows, channels, harmonics = self._flimbox_settings[code[2]]
+            try:
+                windows, channels, harmonics = self._flimbox_settings[code[2]]
+            except KeyError:
+                msg = (
+                    f'unknown FLIMbox settings code {code[2]!r} in {code!r}. '
+                    'Override windows, channels, and harmonics manually.'
+                )
+                raise FbdFileError(msg) from None
             if self.windows < 0:
                 self.windows = windows
             if self.channels < 0:
@@ -950,12 +983,20 @@ class FbdFile(BinaryFile):
             or self.scanner_line_start < 0
             or self.scanner_frame_start < 0
         ):
-            (
-                pixel_dwell_time,
-                scanner_line_add,
-                scanner_line_start,
-                scanner_frame_start,
-            ) = self._scanner_settings[code[3]][code[1]]
+            try:
+                (
+                    pixel_dwell_time,
+                    scanner_line_add,
+                    scanner_line_start,
+                    scanner_frame_start,
+                ) = self._scanner_settings[code[3]][code[1]]
+            except KeyError:
+                msg = (
+                    f'unknown scanner code {code[3]!r}/{code[1]!r}'
+                    f' in {code!r}. '
+                    'Override pixel_dwell_time and scanner settings manually.'
+                )
+                raise FbdFileError(msg) from None
             if self.pixel_dwell_time < 0:
                 self.pixel_dwell_time = pixel_dwell_time
             if self.scanner_frame_start < 0:
@@ -965,7 +1006,10 @@ class FbdFile(BinaryFile):
             if self.scanner_line_length < 0:
                 self.scanner_line_length = self.frame_size + scanner_line_add
         if self.scanner == '':
-            self.scanner = self._scanner_settings[code[3]]['name']
+            try:
+                self.scanner = self._scanner_settings[code[3]]['name']
+            except KeyError:
+                self.scanner = 'Unknown'
         if self.synthesizer == '':
             self.synthesizer = 'Unknown'
         if self.laser_frequency < 0:
@@ -996,10 +1040,16 @@ class FbdFile(BinaryFile):
             or hdr['subtract_background'] > 1
             or hdr['second_harmonic'] > 1
         ):
-            # reload modified header
-            self._header_t = FbdFile._header_t[:20] + FbdFile._header_t[28:]
+            # reload with trimmed header (calibration fields absent)
+            self._effective_header_t = (
+                FbdFile._header_t[:20] + FbdFile._header_t[28:]
+            )
             self._fh.seek(1024)
-            self.header = hdr = numpy.fromfile(self._fh, self._header_t, 1)[0]
+            self.header = hdr = numpy.fromfile(
+                self._fh, self._effective_header_t, 1
+            )[0]
+        else:
+            self._effective_header_t = FbdFile._header_t
 
         if self.harmonics < 0:
             self.harmonics = (1, 2)[self.fbf['secondharmonic']]
@@ -1061,7 +1111,7 @@ class FbdFile(BinaryFile):
                     )
                 except IndexError:
                     # fall back to filename
-                    if self.code:
+                    if self.code and self.code[0] in self._frame_size:
                         self.frame_size = self._frame_size[self.code[0]]
             if self.pixel_dwell_time < 0:
                 try:
@@ -1072,6 +1122,7 @@ class FbdFile(BinaryFile):
                         dwt = self._header_pixel_dwell_time[
                             hdr['pixel_dwell_time_index']
                         ]
+                        self._pixel_dwell_time_from_table = True
                     except IndexError:
                         dwt = 1.0
                 self.pixel_dwell_time = dwt
@@ -1103,6 +1154,7 @@ class FbdFile(BinaryFile):
         )
 
     @property
+    @override
     def attrs(self) -> dict[str, Any]:
         """Selected metadata as dict."""
         return {
@@ -1133,7 +1185,7 @@ class FbdFile(BinaryFile):
         }
 
     @cached_property
-    def decoder_settings(self) -> dict[str, NDArray[numpy.int16] | int]:
+    def decoder_settings(self) -> dict[str, NDArray[numpy.int16] | int | bool]:
         """Return parameters to decode FLIMbox data stream.
 
         Returns:
@@ -1148,18 +1200,22 @@ class FbdFile(BinaryFile):
               right shift to extract markers from data word.
             - 'win_mask', 'win_shr' - Binary mask and number of bits to right
               shift to extract index into lookup table from data word.
+            - 'swap_words' - If True, swap the two 16-bit halves of each
+              32-bit data word before decoding. Optional, defaults to False.
 
         """
-        assert self.decoder is not None
+        if self.decoder is None:
+            msg = 'decoder is not set'
+            raise ValueError(msg)
         try:
             settings = getattr(self, self.decoder)()
-        except Exception as exc:
+        except (AttributeError, NotImplementedError) as exc:
             msg = f'decoder {self.decoder!r} not implemented'
             raise ValueError(msg) from exc
         return settings  # type: ignore[no-any-return]
 
     @staticmethod
-    def _b4w16c4t10() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b4w16c4t10() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 32-bit, 16 windows, 4 channels (Spartan6)
         # with line markers
         # 0b00000000000000000000000011111111 cross correlation phase
@@ -1200,7 +1256,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w16c4t11() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b4w16c4t11() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 32-bit, 16 windows, 4 channels (Spartan6)
         # without line markers
         # 0b00000000000000000000000011111111 cross correlation phase
@@ -1222,7 +1278,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w8c4() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b4w8c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 32-bit, 8 windows, 4 channels (Spartan-6)
         # 0b00000000000000000000000000000001 ch0 photon
         # 0b00000000000000000000000000001110 ch0 window
@@ -1259,7 +1315,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w4c2() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w4c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 4 windows, 2 channels
         # fmt: off
         table = numpy.array(
@@ -1283,7 +1339,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w8c2() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w8c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 8 windows, 2 channels
         # TODO: this does not correctly decode data acquired with ISS firmware
         table = numpy.full((2, 81), -1, numpy.int16)
@@ -1303,8 +1359,16 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w8c4() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w8c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 8 windows, 4 channels
+        # 0b00000000000000000000000011111111 cross correlation time (8 bits)
+        # 0b00000000000000000000000000111111 cross correlation phase (6 bits)
+        # 0b00000000000000000000000100000000 frame sync marker (bit 8)
+        # 0b00000000000000000000011100000000 window (bits [11:9], shared)
+        # 0b00000000000000000001000000000000 ch0 photon (bit 12)
+        # 0b00000000000000000010000000000000 ch1 photon (bit 13)
+        # 0b00000000000000000100000000000000 ch2 photon (bit 14)
+        # 0b00000000000000001000000000000000 ch3 photon (bit 15)
         logger().warning(
             'FbdFile: b2w8c4 decoder not tested. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
@@ -1316,15 +1380,15 @@ class FbdFile(BinaryFile):
             ch1 = (i & 0b0010000) >> 4
             ch2 = (i & 0b0100000) >> 5
             ch3 = (i & 0b1000000) >> 6
-            if ch0 + ch1 + ch2 + ch3 != 1:
-                continue
+            # multiple channels may receive a photon simultaneously;
+            # all active channels share the same window
             if ch0:
                 table[0, i] = win
-            elif ch1:
+            if ch1:
                 table[1, i] = win
-            elif ch2:
+            if ch2:
                 table[2, i] = win
-            elif ch3:
+            if ch3:
                 table[3, i] = win
         return {
             'decoder_table': table,
@@ -1339,7 +1403,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w16c1() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w16c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 16 windows, 1 channel
         logger().warning(
             'FbdFile: b2w16c1 decoder not tested. '
@@ -1364,7 +1428,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w16c2() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w16c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 16 windows, 2 channels
         logger().warning(
             'FbdFile: b2w16c2 decoder not tested. '
@@ -1394,7 +1458,33 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w32c2() -> dict[str, NDArray[numpy.int16] | int]:
+    def _b2w32c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 32 windows, 1 channel
+        # 0b00000000000000000000000111111111 cross correlation time (9 bits)
+        # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
+        # 0b00000000000000000000001000000000 frame sync marker (bit 9)
+        # 0b00000000000000000000010000000000 ch0 photon (bit 10)
+        # 0b00000000000000001111100000000000 ch0 window (bits [15:11], 5 bits)
+        table = numpy.full((1, 64), -1, numpy.int16)
+        for i in range(64):
+            ph0 = i & 0b000001
+            win = (i & 0b111110) >> 1
+            if ph0:
+                table[0, i] = win
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0x1FF,
+            'tcc_shr': 0,
+            'pcc_mask': 0xFF,
+            'pcc_shr': 0,
+            'marker_mask': 0x200,
+            'marker_shr': 9,
+            'win_mask': 0xFFFF,
+            'win_shr': 10,
+        }
+
+    @staticmethod
+    def _b2w32c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
         # return parameters to decode 32 windows, 2 channels
         # TODO
         msg = (
@@ -1404,14 +1494,208 @@ class FbdFile(BinaryFile):
         raise NotImplementedError(msg)
 
     @staticmethod
-    def _b2w64c1() -> dict[str, NDArray[numpy.int16] | int]:
-        # return parameters to decode 64 windows, 1 channel
-        # TODO
-        msg = (
-            'FbdFile: b2w64c1 decoder not implemented. '
+    def _b4w32c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 32-bit, 32 windows, 2 channels
+        # Firmware: 32w32fifo256bin
+        # Each 32-bit word encodes two independent 16-bit 32w1ch words:
+        # 0b00000000000000000000000111111111 ch0 CC time (9 bits)
+        # 0b00000000000000000000000011111111 ch0 CC phase (8 bits)
+        # 0b00000000000000000000001000000000 frame sync marker (bit 9)
+        # 0b00000000000000000000010000000000 ch0 photon (bit 10)
+        # 0b00000000000000001111100000000000 ch0 window (bits [15:11], 5 bits)
+        # 0b00000001111111110000000000000000 ch1 CC time (bits [24:16])
+        # 0b00000001000000000000000000000000 ch1 photon (bit 26)
+        # 0b11111100000000000000000000000000 ch1 window (bits [31:27], 5 bits)
+        # win_mask covers bits [31:10] = 22 bits;
+        # ch0 at [15:10], ch1 at [31:26]
+        logger().warning(
+            'FbdFile: b4w32c2 decoder not tested. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
-        raise NotImplementedError(msg)
+        table = numpy.full((2, 2**22), -1, numpy.int16)
+        indices = numpy.arange(2**22, dtype=numpy.uint32)
+        # ch0: bit 0 of index = ch0 photon (orig bit 10),
+        # bits [5:1] = ch0 window
+        ch0_photon = (indices & 0x1).astype(bool)
+        ch0_window = (indices >> 1) & 0x1F
+        table[0] = numpy.where(ch0_photon, ch0_window, -1).astype(numpy.int16)
+        # ch1: bit 16 of index = ch1 photon (orig bit 26),
+        # bits [21:17] = ch1 window
+        ch1_photon = ((indices >> 16) & 0x1).astype(bool)
+        ch1_window = (indices >> 17) & 0x1F
+        table[1] = numpy.where(ch1_photon, ch1_window, -1).astype(numpy.int16)
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0x1FF,
+            'tcc_shr': 0,
+            'pcc_mask': 0xFF,
+            'pcc_shr': 0,
+            'marker_mask': 0x200,
+            'marker_shr': 9,
+            'win_mask': 0xFFFFFC00,
+            'win_shr': 10,
+        }
+
+    @staticmethod
+    def _b4w64c3() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 32-bit, 64 windows, 3 channels
+        # Firmware: 64w32fifo256bin
+        # 0b00000000000000000000001111111111 cross correlation time (10 bits)
+        # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
+        # 0b00000000000000000000010000000000 frame sync marker (bit 10)
+        # 0b00000000000000000000100000000000 ch0 photon (bit 11)
+        # 0b00000000000000000111000000000000 ch0 window (bits [14:12]... wait)
+        # bits [17:12] = ch0 window (6 bits), bit 11 = ch0 photon
+        # bit 18 = ch1 photon, bits [24:19] = ch1 window
+        # bit 25 = ch2 photon, bits [31:26] = ch2 window
+        # win_mask covers bits [31:11] = 21 bits
+        logger().warning(
+            'FbdFile: b4w64c3 decoder not tested. '
+            'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
+        )
+        table = numpy.full((3, 2**21), -1, numpy.int16)
+        indices = numpy.arange(2**21, dtype=numpy.uint32)
+        # ch0: bit 0 of index = ch0 photon (orig bit 11),
+        # bits [6:1] = ch0 window
+        ch0_photon = (indices & 0x1).astype(bool)
+        ch0_window = (indices >> 1) & 0x3F
+        table[0] = numpy.where(ch0_photon, ch0_window, -1).astype(numpy.int16)
+        # ch1: bit 7 of index = ch1 photon (orig bit 18),
+        # bits [13:8] = ch1 window
+        ch1_photon = ((indices >> 7) & 0x1).astype(bool)
+        ch1_window = (indices >> 8) & 0x3F
+        table[1] = numpy.where(ch1_photon, ch1_window, -1).astype(numpy.int16)
+        # ch2: bit 14 of index = ch2 photon (orig bit 25),
+        # bits [20:15] = ch2 window
+        ch2_photon = ((indices >> 14) & 0x1).astype(bool)
+        ch2_window = (indices >> 15) & 0x3F
+        table[2] = numpy.where(ch2_photon, ch2_window, -1).astype(numpy.int16)
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0x3FF,
+            'tcc_shr': 0,
+            'pcc_mask': 0xFF,
+            'pcc_shr': 0,
+            'marker_mask': 0x400,
+            'marker_shr': 10,
+            'win_mask': 0xFFFFF800,
+            'win_shr': 11,
+        }
+
+    @staticmethod
+    def _b4w32c3() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 32-bit, 32 windows, 3 channels
+        # Firmware: 32w32fifo256bin3ch
+        # 0b00000000000000000000011111111111 cross correlation time (11 bits)
+        # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
+        # 0b00000000000000000010000000000000 frame sync marker (bit 13)
+        # 0b00000000000000000100000000000000 ch0 photon (bit 14)
+        # 0b00000000000001111000000000000000 ch0 window (bits [19:15], 5 bits)
+        # 0b00000000000100000000000000000000 ch1 photon (bit 20)
+        # 0b00000011111000000000000000000000 ch1 window (bits [25:21], 5 bits)
+        # 0b00000100000000000000000000000000 ch2 photon (bit 26)
+        # 0b11111000000000000000000000000000 ch2 window (bits [31:27], 5 bits)
+        # win_mask covers bits [31:14] = 18 bits
+        logger().warning(
+            'FbdFile: b4w32c3 decoder not tested. '
+            'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
+        )
+        table = numpy.full((3, 2**18), -1, numpy.int16)
+        indices = numpy.arange(2**18, dtype=numpy.uint32)
+        # ch0: bit 0 of index = ch0 photon (orig bit 14),
+        # bits [5:1] = ch0 window
+        ch0_photon = (indices & 0x1).astype(bool)
+        ch0_window = (indices >> 1) & 0x1F
+        table[0] = numpy.where(ch0_photon, ch0_window, -1).astype(numpy.int16)
+        # ch1: bit 6 of index = ch1 photon (orig bit 20),
+        # bits [11:7] = ch1 window
+        ch1_photon = ((indices >> 6) & 0x1).astype(bool)
+        ch1_window = (indices >> 7) & 0x1F
+        table[1] = numpy.where(ch1_photon, ch1_window, -1).astype(numpy.int16)
+        # ch2: bit 12 of index = ch2 photon (orig bit 26),
+        # bits [17:13] = ch2 window
+        ch2_photon = ((indices >> 12) & 0x1).astype(bool)
+        ch2_window = (indices >> 13) & 0x1F
+        table[2] = numpy.where(ch2_photon, ch2_window, -1).astype(numpy.int16)
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0x7FF,
+            'tcc_shr': 0,
+            'pcc_mask': 0xFF,
+            'pcc_shr': 0,
+            'marker_mask': 0x2000,
+            'marker_shr': 13,
+            'win_mask': 0xFFFFC000,
+            'win_shr': 14,
+        }
+
+    @staticmethod
+    def _b4w32c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 32-bit, 32 windows, 4 channels
+        # Firmware: 32w32fifo64bin4ch (variable ccTimeBitCount/ccPhaseBitCount)
+        # 0b00000000000000000000000001111111 tcc (variable, <=7 bits)
+        # 0b00000000000000000000000000111111 pcc (variable, <=6 bits)
+        # 0b00000000000000000000000010000000 frame sync marker (bit 7)
+        # 0b00000000000000000000000100000000 ch0 photon (bit 8)
+        # 0b00000000000000000000011110000000 ch0 window (bits [13:9], 5 bits)
+        # Actually: bits [13:9] = ch0 window, bit 8 = ch0 photon
+        # bit 14 = ch1 photon, bits [19:15] = ch1 window
+        # bit 20 = ch2 photon, bits [25:21] = ch2 window
+        # bit 26 = ch3 photon, bits [31:27] = ch3 window
+        # win_mask covers bits [31:8] = 24 bits -> 2^24 = 16M entries
+        # Note: uses ~128 MB of RAM for the decoder table
+        logger().warning(
+            'FbdFile: b4w32c4 decoder not tested. '
+            'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
+        )
+        table = numpy.full((4, 2**24), -1, numpy.int16)
+        indices = numpy.arange(2**24, dtype=numpy.uint32)
+        for ic in range(4):
+            # bit (6*ic) of index = photon, bits [(6*ic+5):(6*ic+1)] = window
+            photon = ((indices >> (ic * 6)) & 0x1).astype(bool)
+            window = (indices >> (1 + ic * 6)) & 0x1F
+            table[ic] = numpy.where(photon, window, -1).astype(numpy.int16)
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0x7F,
+            'tcc_shr': 0,
+            'pcc_mask': 0x3F,
+            'pcc_shr': 0,
+            'marker_mask': 0x80,
+            'marker_shr': 7,
+            'win_mask': 0xFFFFFF00,
+            'win_shr': 8,
+        }
+
+    @staticmethod
+    def _b2w64c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
+        # return parameters to decode 64 windows, 1 channel
+        # 0b00000000000000000000000011111111 cross correlation time (8 bits)
+        # 0b00000000000000000000000000111111 cross correlation phase (6 bits)
+        # 0b00000000000000000000000100000000 frame sync marker (bit 8)
+        # 0b00000000000000000000001000000000 ch0 photon (bit 9)
+        # 0b00000000000000001111110000000000 ch0 window (bits [15:10], 6 bits)
+        logger().warning(
+            'FbdFile: b2w64c1 decoder not tested. '
+            'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
+        )
+        table = numpy.full((1, 128), -1, numpy.int16)
+        for i in range(128):
+            ph0 = i & 0b0000001
+            win = (i & 0b1111110) >> 1
+            if ph0:
+                table[0, i] = win
+        return {
+            'decoder_table': table,
+            'tcc_mask': 0xFF,
+            'tcc_shr': 0,
+            'pcc_mask': 0x3F,
+            'pcc_shr': 0,
+            'marker_mask': 0x100,
+            'marker_shr': 8,
+            'win_mask': 0xFE00,
+            'win_shr': 9,
+        }
 
     def decode(
         self,
@@ -1445,11 +1729,11 @@ class FbdFile(BinaryFile):
         Returns:
             bins:
                 Cross correlation phase index for all channels and data points.
-                A int8 array of shape (channels, size).
-                A value of -1 means no photon was counted.
+                An ``int8`` or ``int16`` array of shape ``(channels, size)``.
+                A value of ``-1`` means no photon was counted.
             times:
                 The times in FLIMbox counter units at each data point.
-                An array of type uint64 or uint32, potentially huge.
+                An array of type uint64, potentially huge.
             markers:
                 The indices of up markers in the data stream, usually
                 indicating frame starts. An array of type ssize_t.
@@ -1462,12 +1746,14 @@ class FbdFile(BinaryFile):
             try:
                 data = numpy.fromfile(self._fh, dtype=dtype, count=word_count)
             except io.UnsupportedOperation:
-                data = numpy.frombuffer(
-                    self._fh.read(dtype.itemsize * word_count), dtype=dtype
-                )
-        elif skip_words or word_count != -1:
+                if word_count < 0:
+                    raw = self._fh.read()
+                else:
+                    raw = self._fh.read(dtype.itemsize * word_count)
+                data = numpy.frombuffer(raw, dtype=dtype)
+        elif skip_words > 0 or word_count >= 0:
             if word_count < 0:
-                data = data[skip_words:word_count]
+                data = data[skip_words:]
             else:
                 data = data[skip_words : skip_words + word_count]
         if data.dtype != dtype:
@@ -1481,7 +1767,7 @@ class FbdFile(BinaryFile):
         times_out = numpy.empty(data.size, dtype=numpy.uint64)
         markers_out = numpy.zeros(max_markers, dtype=numpy.intp)
 
-        fbd_decode(
+        count = fbd_decode(
             data,
             bins_out,
             times_out,
@@ -1493,14 +1779,162 @@ class FbdFile(BinaryFile):
             **self.decoder_settings,
         )
 
-        markers_out = markers_out[markers_out > 0]
-        if len(markers_out) == max_markers:
+        markers_out = markers_out[:count]
+        if count == max_markers:
             warnings.warn(
                 f'number of markers exceeded buffer size {max_markers}',
                 stacklevel=2,
             )
 
         return bins_out, times_out, markers_out
+
+    def refine_settings(
+        self,
+        records: tuple[NDArray[Any], NDArray[Any], NDArray[Any]] | None = None,
+        /,
+        *,
+        aspect_range: tuple[float, float] = (0.8, 1.2),
+        **kwargs: Any,
+    ) -> bool | None:
+        """Refine pixel_dwell_time and laser_factor from frame durations.
+
+        First evaluate the current ``pixel_dwell_time`` against the frame
+        data. Then, only when ``pixel_dwell_time`` was originally derived
+        from the header's ``pixel_dwell_time_index`` (i.e. not from
+        computed timing metadata, XML/FBS settings, or user input), search
+        ``_header_pixel_dwell_time`` for a value that produces *more* valid
+        frames and replace ``pixel_dwell_time`` if found. Always refine
+        ``laser_factor`` from the median of detected frame durations.
+        Update attributes in-place and issue warnings.
+
+        Parameters:
+            records:
+                Bins, times, and markers from decode function.
+                By default, call :py:meth:`FbdFile.decode`.
+            aspect_range:
+                Minimum and maximum aspect ratios of valid frames.
+            **kwargs:
+                Additional arguments passed to
+                :py:meth:`FbdFile.decode`.
+
+        Returns:
+            True if any setting was changed,
+            False if settings are already optimal,
+            and None if no valid frames could be found.
+
+        """
+        if records is None:
+            records = self.decode(**kwargs)
+        times, markers = records[-2:]
+
+        if len(markers) < 2:
+            msg = 'not enough markers to detect frames'
+            raise ValueError(msg)
+
+        frame_durations = numpy.ediff1d(times[markers])
+        old_dwell_time = self.pixel_dwell_time
+        old_laser_factor = self.laser_factor
+        pmax = self.pmax
+        pmax_factor = float(pmax / (pmax - 1))
+        lf = self.laser_frequency * self.laser_factor
+        best_dwell_time = old_dwell_time
+        best_count = 0
+        best_durations: list[float] = []
+        best_line_num = self.frame_size
+
+        # Seed best with the current pixel_dwell_time so table candidates
+        # must strictly outperform it. This preserves correct user-supplied
+        # or metadata-derived values that are not in _header_pixel_dwell_time.
+        ups = old_dwell_time * 1e-6 * pmax_factor * lf
+        lt = self.scanner_line_length * ups
+        if lt > 0:
+            _line_num = sys.maxsize
+            for duration in frame_durations:
+                lines = duration / lt
+                if lines <= 0:
+                    continue
+                aspect = self.frame_size / lines
+                if aspect_range[0] < aspect < aspect_range[1]:
+                    best_count += 1
+                    best_durations.append(float(duration))
+                    _line_num = min(_line_num, lines)
+            if _line_num < sys.maxsize:
+                best_line_num = round(_line_num)
+
+        if self._pixel_dwell_time_from_table:
+            for candidate in self._header_pixel_dwell_time:
+                ups = candidate * 1e-6 * pmax_factor * lf
+                lt = self.scanner_line_length * ups
+                if lt <= 0:
+                    continue
+                count = 0
+                valid_durations: list[float] = []
+                line_num = sys.maxsize
+                for duration in frame_durations:
+                    lines = duration / lt
+                    if lines <= 0:
+                        continue
+                    aspect = self.frame_size / lines
+                    if aspect_range[0] < aspect < aspect_range[1]:
+                        count += 1
+                        valid_durations.append(float(duration))
+                        line_num = min(line_num, lines)
+                if count > best_count:
+                    best_count = count
+                    best_dwell_time = float(candidate)
+                    best_durations = valid_durations
+                    if line_num < sys.maxsize:
+                        best_line_num = round(line_num)
+
+        if best_count == 0:
+            if self._pixel_dwell_time_from_table:
+                warnings.warn(
+                    'refine_settings: no pixel_dwell_time in '
+                    f'{self._header_pixel_dwell_time} produces valid frames',
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f'refine_settings: pixel_dwell_time {old_dwell_time} '
+                    'does not produce valid frames',
+                    stacklevel=2,
+                )
+            return None
+
+        changed = False
+
+        if best_dwell_time != old_dwell_time:
+            self.pixel_dwell_time = best_dwell_time
+            changed = True
+            warnings.warn(
+                f'refine_settings: pixel_dwell_time changed'
+                f' from {old_dwell_time} to {best_dwell_time}',
+                stacklevel=2,
+            )
+
+        # refine laser_factor from median of valid frame durations
+        if best_durations:
+            ups = self.pixel_dwell_time * 1e-6 * pmax_factor * lf
+            lt = self.scanner_line_length * ups
+            median_dur = float(numpy.median(best_durations))
+            line_num = best_line_num
+            if best_line_num < self.frame_size:
+                line_num = self.frame_size
+            new_factor = median_dur * self.laser_factor / (line_num * lt)
+            if new_factor != old_laser_factor:
+                self.laser_factor = new_factor
+                changed = True
+                if (
+                    abs(new_factor - old_laser_factor) / old_laser_factor
+                    > 1.0 / line_num
+                ):
+                    warnings.warn(
+                        'refine_settings: laser_factor changed '
+                        f'from {old_laser_factor} to {new_factor}',
+                        stacklevel=2,
+                    )
+
+        return changed
 
     def frames(
         self,
@@ -1510,6 +1944,7 @@ class FbdFile(BinaryFile):
         select_frames: slice | None = None,
         aspect_range: tuple[float, float] = (0.8, 1.2),
         frame_cluster: int = 0,
+        refine: bool | None = True,
         **kwargs: Any,
     ) -> tuple[tuple[int, int], NDArray[Any]]:
         """Return shape and start/stop indices of scanner frames.
@@ -1528,8 +1963,10 @@ class FbdFile(BinaryFile):
                 Minimum and maximum aspect ratios of valid frames.
                 The default lets 1:1 aspect pass.
             frame_cluster:
-                Index of the frame duration cluster to use when calculating
-                the correction factor.
+                Index of the frame duration cluster to use when
+                calculating the correction factor.
+            refine:
+                Refine settings: True=always, None=if needed, False=never.
             **kwargs:
                 Additional arguments passed to :py:meth:`FbdFile.decode`.
 
@@ -1553,6 +1990,7 @@ class FbdFile(BinaryFile):
         frame_durations = numpy.ediff1d(times[markers])
 
         frame_markers = []
+        valid_durations: list[float] = []
         if aspect_range:
             # detect frame markers assuming correct settings
             line_num = sys.maxsize
@@ -1565,10 +2003,37 @@ class FbdFile(BinaryFile):
                     frame_markers.append(
                         (int(markers[i]), int(markers[i + 1]) - 1)
                     )
+                    valid_durations.append(float(duration))
                 else:
                     continue
                 line_num = min(line_num, lines)
             line_num = round(line_num)
+
+        if refine is True and self.refine_settings(
+            records, aspect_range=aspect_range
+        ):
+            # always refine settings before frame detection
+            return self.frames(
+                records,
+                select_frames=select_frames,
+                aspect_range=aspect_range,
+                frame_cluster=frame_cluster,
+                refine=False,
+            )
+
+        if (
+            not frame_markers
+            and refine is None
+            and self.refine_settings(records, aspect_range=aspect_range)
+        ):
+            # refine settings as fallback when no frames detected
+            return self.frames(
+                records,
+                select_frames=select_frames,
+                aspect_range=aspect_range,
+                frame_cluster=frame_cluster,
+                refine=False,
+            )
 
         if not frame_markers:
             # calculate frame duration clusters, assuming few clusters that
@@ -1590,7 +2055,16 @@ class FbdFile(BinaryFile):
             if not clusters:
                 msg = 'no frame duration clusters found'
                 raise ValueError(msg)
-            clusters = sorted(clusters, key=lambda x: x[1], reverse=True)
+            # sort by count descending, keeping track of original indices
+            order = sorted(
+                range(len(clusters)),
+                key=lambda k: clusters[k][1],
+                reverse=True,
+            )
+            clusters = [clusters[k] for k in order]
+            # remap cluster_indices so they refer to the new sorted positions
+            remap = {orig: new for new, orig in enumerate(order)}
+            cluster_indices = [remap[c] for c in cluster_indices]
             # possible correction factors, assuming square frame shape
             line_num = self.frame_size
             laser_factors = [c[0] / (line_time * line_num) for c in clusters]
@@ -1647,7 +2121,8 @@ class FbdFile(BinaryFile):
                 Bins, times, and markers from decode function.
                 By default, call :py:meth:`FbdFile.decode`.
             frames:
-                Scanner_shape and frame_markers from frames function.
+                ``scanner_shape`` and ``frame_markers`` returned by
+                :py:meth:`FbdFile.frames`.
                 By default, call :py:meth:`FbdFile.frames`.
             integrate_frames:
                 Specifies which frames to sum. By default, all frames are
@@ -1658,16 +2133,26 @@ class FbdFile(BinaryFile):
             num_threads:
                 Number of OpenMP threads to use for parallelization.
             **kwargs:
-                Additional arguments passed to :py:meth:`FbdFile.decode` and
-                :py:meth:`FbdFile.frames`.
+                Additional arguments passed to
+                :py:meth:`FbdFile.decode` and
+                :py:meth:`FbdFile.frames`, including ``refine``
+                (True=always, None=if needed, False=never).
 
         Returns:
             Image histogram of shape (number of frames, channels in bins
-            array, detected line numbers, frame_size, histogram bins).
+            array, lines per frame, scanner samples per line,
+            histogram bins). If ``square_frame`` is True, both lines per frame
+            and scanner samples per line equal ``frame_size``; otherwise they
+            equal the detected line count and ``scanner_line_length``
+            respectively.
 
         """
         kwargs_frames = parse_kwargs(
-            kwargs, 'select_frames', 'aspect_range', 'frame_cluster'
+            kwargs,
+            'select_frames',
+            'aspect_range',
+            'frame_cluster',
+            'refine',
         )
         if records is None:
             records = self.decode(num_threads=num_threads, **kwargs)
@@ -1675,6 +2160,14 @@ class FbdFile(BinaryFile):
         if frames is None:
             frames = self.frames(records, **kwargs_frames)
         scanner_shape, frame_markers = frames
+        # capture units_per_sample after frames() may have updated laser_factor
+        units_per_sample = self.units_per_sample
+        if integrate_frames and integrate_frames > len(frame_markers):
+            msg = (
+                f'{integrate_frames=} exceeds '
+                f'number of detected frames ({len(frame_markers)})'
+            )
+            raise ValueError(msg)
         # an extra line to scanner frame to allow clipping indices
         scanner_shape = scanner_shape[0] + 1, scanner_shape[1]
         # allocate output array of scanner frame shape
@@ -1690,7 +2183,7 @@ class FbdFile(BinaryFile):
             bins,
             times,
             frame_markers,
-            self.units_per_sample,
+            units_per_sample,
             self.scanner_frame_start,
             result,
             num_threads,
@@ -1698,6 +2191,13 @@ class FbdFile(BinaryFile):
         # reshape frames and slice valid region
         result = result.reshape(shape[:2] + scanner_shape + shape[-1:])
         if square_frame:
+            line_num = scanner_shape[0] - 1  # undo the +1 guard row
+            if line_num < self.frame_size:
+                warnings.warn(
+                    f'square_frame=True: detected {line_num} lines is less '
+                    f'than {self.frame_size=}; output will contain zeros',
+                    stacklevel=2,
+                )
             result = result[
                 ...,
                 : self.frame_size,
@@ -1707,9 +2207,7 @@ class FbdFile(BinaryFile):
             ]
         return result
 
-    def __enter__(self) -> FbdFile:
-        return self
-
+    @override
     def __str__(self) -> str:
         info = [repr(self)]
         info.extend(f'{a}: {getattr(self, a)}' for a in self._attributes)
@@ -1726,7 +2224,9 @@ class FbdFile(BinaryFile):
                     'header:',
                     *(
                         f'{k}: {self.header[k]}'[:64]
-                        for k, _ in self._header_t
+                        for k, _ in (
+                            self._effective_header_t or FbdFile._header_t
+                        )
                         if k[0] != '_'
                     ),
                 )
@@ -1790,7 +2290,8 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
     format.
 
     Parameters:
-        file: Name of file to open.
+        file:
+            Name of file to open, or seekable text stream.
 
     Examples:
         >>> fbs = fbs_read('tests/data/flimbox_settings.fbs.xml')
@@ -1845,7 +2346,7 @@ def fbf_read(
 
     Parameters:
         file:
-            Name of FBF file to open.
+            Name of FBF file to open, or seekable binary stream.
         firmware:
             Include the firmware binary data.
         maxheaderlength:
@@ -2064,9 +2565,8 @@ def fbd_to_b64(
         integrate_frames:
             Specifies which frames to sum. By default, no frames are summed.
         square_frame:
-            If True, return square image (frame_size x frame_size).
-            Else return full scanner frame.
-            Only works if `show` is true.
+            If True, crop to square image (frame_size x frame_size).
+            Else keep the full scanner frame.
         pdiv:
             Divisor to reduce number of entries in phase histogram.
         laser_frequency:
@@ -2200,7 +2700,7 @@ def parse_kwargs(
     _del: bool = True,
     **keyvalues: Any,
 ) -> dict[str, Any]:
-    """Return dict with keys from keys|keyvals and values from kwargs|keyvals.
+    """Return a dict with selected values from ``kwargs`` and defaults.
 
     Examples:
         >>> kwargs = {'one': 1, 'two': 2, 'four': 4}
@@ -2256,7 +2756,7 @@ def format_dict(
 
 
 def nullfunc(*args: Any, **kwargs: Any) -> None:
-    """Null function."""
+    """Do nothing."""
     del args, kwargs
 
 
@@ -2384,7 +2884,7 @@ def asbool(
     /,
     true: Sequence[str] | None = None,
     false: Sequence[str] | None = None,
-) -> bool | bytes:
+) -> bool:
     """Return string as boolean if possible, else raise TypeError.
 
     >>> asbool('ON', ['on'], ['off'])
@@ -2419,7 +2919,7 @@ def logger() -> logging.Logger:
 
 
 def askopenfilename(**kwargs: Any) -> str:
-    """Return file name(s) from Tkinter's file open dialog."""
+    """Return file name from Tkinter's file open dialog."""
     from tkinter import Tk, filedialog
 
     root = Tk()
@@ -2431,7 +2931,7 @@ def askopenfilename(**kwargs: Any) -> str:
 
 
 def main() -> int:
-    """Command line usage main function."""
+    """Run the command-line interface and return the exit code."""
     import click
 
     @click.group()
