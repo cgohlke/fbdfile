@@ -39,7 +39,6 @@
 
 from cython.parallel import parallel, prange
 
-cimport openmp
 from libc.stdint cimport int8_t, int16_t, uint8_t, uint16_t, uint32_t, uint64_t
 
 ctypedef fused data_t:
@@ -60,14 +59,14 @@ ctypedef fused sflim_t:
 
 
 def fbd_decode(
-    const data_t[::] data,
+    const data_t[::1] data,
     bins_t[:, ::1] bins_out,
     times_t[::1] times_out,
     ssize_t[::1] markers_out,
     const int windows,
     const int pdiv,
     const int harmonics,
-    const int16_t[:, ::] decoder_table,
+    const int16_t[:, ::1] decoder_table,
     const data_t tcc_mask,
     const uint32_t tcc_shr,
     const data_t pcc_mask,
@@ -90,6 +89,8 @@ def fbd_decode(
             A `int8` or `int16` array of shape `(channels, data.size)`, where
             decoded cross correlation phase indices are returned.
             A value of -1 means no photon was counted.
+            A value of -2 means the window index exceeded the decoder_table
+            (should not occur with valid input).
         times_out (numpy.ndarray):
             `uint32` or `uint64` array of length `data.size`, where
             times in FLIMbox counter units at each data point are returned.
@@ -127,6 +128,9 @@ def fbd_decode(
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
 
+    Returns:
+        Number of markers written to `markers_out`.
+
     """
     cdef:
         int maxwindex = <int>decoder_table.shape[1]
@@ -139,6 +143,7 @@ def fbd_decode(
         int m0, m1, pcc, win
         int pmax = ((pcc_mask >> pcc_shr) + 1) // harmonics
         int pmax_win = harmonics * pmax // windows
+        bint do_swap = (data_t is uint32_t) and swap_words
 
     if bins_out.shape[0] != decoder_table.shape[0]:
         raise ValueError('shape mismatch between bins and decoder_table')
@@ -146,8 +151,9 @@ def fbd_decode(
         raise ValueError('shape mismatch between bins and time')
     if pmax <= 1 or pmax_win < 1 or pdiv < 1:
         raise ValueError('invalid parameters')
-    if swap_words and data.itemsize != 4:
-        raise ValueError(f'cannot swap words of {data.itemsize=}')
+    if data_t is uint16_t:
+        if swap_words:
+            raise ValueError(f'cannot swap words of {data.itemsize=}')
     if datasize == 0:
         return
 
@@ -156,7 +162,7 @@ def fbd_decode(
         for c in prange(nchannel):
             for i in range(datasize):
                 d = data[i]
-                if swap_words:
+                if do_swap:
                     d = (d >> 16) | (d << 16)
                 pcc = <int>((d & pcc_mask) >> pcc_shr)
                 win = <int>((d & win_mask) >> win_shr)
@@ -175,14 +181,14 @@ def fbd_decode(
     tcc_max = (tcc_mask >> tcc_shr) + 1
     j = 0
     d = data[0]
-    if swap_words:
+    if do_swap:
         d = (d >> 16) | (d << 16)
     m0 = <int>(d & marker_mask)
     t0 = (d & tcc_mask) >> tcc_shr
     times_out[0] = 0
     for i in range(1, datasize):
         d = data[i]
-        if swap_words:
+        if do_swap:
             d = (d >> 16) | (d << 16)
         # detect up-markers
         if j < maxmarker:
@@ -201,6 +207,8 @@ def fbd_decode(
         else:
             # is this supposed to happen?  0 < t0 <= t1
             times_out[i] = times_out[i-1] + (tcc_max - t1) + t0
+
+    return j
 
 
 def fbd_histogram(
@@ -329,6 +337,9 @@ def sflim_decode(
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
 
+    Returns:
+        Number of image frames decoded.
+
     Examples:
         >>> import numpy, math
         >>> data = numpy.fromfile(
@@ -352,7 +363,6 @@ def sflim_decode(
     cdef:
         ssize_t size = data.size
         ssize_t address
-        openmp.omp_lock_t lock
         ssize_t ret
 
     if size == 0:
@@ -367,28 +377,23 @@ def sflim_decode(
     if enabletime == 0:
         enabletime = pixeltime * sflim.shape[3]
 
-    openmp.omp_init_lock(&lock)
-
-    try:
-        with nogil, parallel(num_threads=num_threads):
-            for address in prange(8):
-                ret = _decode_address(
-                    address,
-                    data,
-                    sflim,
-                    size,
-                    pixeltime,
-                    enabletime,
-                    maxframes,
-                    lock
-                )
-                if ret < 0:
-                    with gil:
-                        raise ValueError(
-                            f'no start of frame found for {address=}'
-                        )
-    finally:
-        openmp.omp_destroy_lock(&lock)
+    with nogil, parallel(num_threads=num_threads):
+        for address in prange(8):
+            ret = _decode_address(
+                address,
+                data,
+                sflim,
+                size,
+                pixeltime,
+                enabletime,
+                maxframes,
+            )
+            if ret < 0:
+                with gil:
+                    raise ValueError(
+                        f'no start of frame found for {address=}'
+                    )
+    return ret
 
 
 cdef ssize_t _decode_address(
@@ -399,7 +404,6 @@ cdef ssize_t _decode_address(
     const uint64_t pixeltime,
     const uint64_t enabletime,
     const ssize_t maxframes,
-    openmp.omp_lock_t lock
 ) nogil:
     """Decode single address."""
     cdef:
@@ -436,6 +440,11 @@ cdef ssize_t _decode_address(
         tcc = d & MASK_TCC
         enable = (d & MASK_ENA) >> SHR_ENA
 
+        # Advance macrotime by one full TCC period on rollover.
+        # NOTE: assumes at most one full period (4096 counts) elapses between
+        # consecutive words for the same address. If the stream contains long
+        # runs of words for other addresses, multiple rollovers can be missed,
+        # causing macrotime to silently under-count.
         if tcc < tcc0:
             macrotime += 4096
         tcc0 = tcc
@@ -458,33 +467,25 @@ cdef ssize_t _decode_address(
         if ph:
             c = address * 4
             h = (pcc + 32 * ((d & MASK_WN0) >> SHR_WN0)) % 256
-            openmp.omp_set_lock(&lock)
             sflim[c, h, y, x] += 1
-            openmp.omp_unset_lock(&lock)
 
         ph = (d & MASK_PH1) >> SHR_PH1
         if ph:
             c = address * 4 + 1
             h = (pcc + 32 * ((d & MASK_WN1) >> SHR_WN1)) % 256
-            openmp.omp_set_lock(&lock)
             sflim[c, h, y, x] += 1
-            openmp.omp_unset_lock(&lock)
 
         ph = (d & MASK_PH2) >> SHR_PH2
         if ph:
             c = address * 4 + 2
             h = (pcc + 32 * ((d & MASK_WN2) >> SHR_WN2)) % 256
-            openmp.omp_set_lock(&lock)
             sflim[c, h, y, x] += 1
-            openmp.omp_unset_lock(&lock)
 
         ph = (d & MASK_PH3) >> SHR_PH3
         if ph:
             c = address * 4 + 3
             h = (pcc + 32 * ((d & MASK_WN3) >> SHR_WN3)) % 256
-            openmp.omp_set_lock(&lock)
             sflim[c, h, y, x] += 1
-            openmp.omp_unset_lock(&lock)
 
     return frames
 
@@ -633,6 +634,11 @@ cdef ssize_t _decode_address_photons(
         tcc = d & MASK_TCC
         enable = (d & MASK_ENA) >> SHR_ENA
 
+        # Advance macrotime by one full TCC period on rollover.
+        # NOTE: assumes at most one full period (4096 counts) elapses between
+        # consecutive words for the same address. If the stream contains long
+        # runs of words for other addresses, multiple rollovers can be missed,
+        # causing macrotime to silently under-count.
         if tcc < tcc0:
             macrotime += 4096
         tcc0 = tcc
