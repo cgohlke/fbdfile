@@ -18,14 +18,14 @@ LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
 if LIMITED_API and not sysconfig.get_config_var('Py_GIL_DISABLED'):
     py_limited_api = True
     define_macros = [
-        ('Py_LIMITED_API', 0x030B0000),
+        ('Py_LIMITED_API', 0x030C0000),
         ('CYTHON_LIMITED_API', '1'),
     ]
-    options = {'bdist_wheel': {'py_limited_api': 'cp311'}}
+    setup_options = {'bdist_wheel': {'py_limited_api': 'cp312'}}
 else:
     py_limited_api = False
     define_macros = []
-    options = {}
+    setup_options = {}
 
 
 def search(pattern: str, string: str, flags: int = 0) -> str:
@@ -75,7 +75,7 @@ readme = '\n'.join(
 if 'sdist' in sys.argv:
     # update README, LICENSE, and CHANGES files
 
-    with open('README.rst', 'w', encoding='utf-8') as fh:
+    with open('README.rst', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(fix_docstring_examples(readme))
 
     license = search(
@@ -85,7 +85,7 @@ if 'sdist' in sys.argv:
     )
     license = license.replace('# ', '').replace('#', '')
 
-    with open('LICENSE', 'w', encoding='utf-8') as fh:
+    with open('LICENSE', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('BSD-3-Clause license\n\n')
         fh.write(license)
 
@@ -99,8 +99,8 @@ if 'sdist' in sys.argv:
     #     old = fh.read()
 
     # old = old.split(revisions.splitlines()[-1])[-1]
-    # with open('CHANGES.rst', 'w', encoding='utf-8') as fh:
-    #     fh.write(revisions.strip())
+    # with open('CHANGES.rst', 'w', encoding='utf-8', newline='\n') as fh:
+    #     fh.write(revisions.replace('---------', '=========').strip())
     #     fh.write(old)
 
 include_dirs = [numpy.get_include()]
@@ -161,25 +161,23 @@ setup(
     package_data={'fbdfile': ['py.typed']},
     entry_points={
         'console_scripts': [
-            'fbdfile = fbdfile.__main__:main',
+            'fbdfile = fbdfile.fbdfile:main',
             'fbd2b64 = fbdfile.fbd2b64:main',
         ]
     },
-    python_requires='>=3.11',
-    install_requires=['numpy'],
+    python_requires='>=3.12',
+    install_requires=['numpy>=2.0'],
     extras_require={'all': ['tifffile', 'matplotlib', 'click']},
     ext_modules=ext_modules,
-    options=options,
-    zip_safe=False,
+    options=setup_options,
     platforms=['any'],
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
         'Programming Language :: Cython',
         'Programming Language :: Python :: 3 :: Only',
-        'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
