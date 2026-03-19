@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.6
+:Version: 2026.3.20
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -34,16 +34,29 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
 
 Revisions
 ---------
+
+2026.3.20
+
+- Frames and asimage methods always refine laser_factor by default (breaking).
+- Add tri-state refine option to frames and asimage methods.
+- Add refine_settings method to refine pixel_dwell_time and laser_factor.
+- Add more decoder settings (not tested).
+- Fix decode to read all bytes from streams and fix skip/count guard.
+- Fix cluster-to-frame-marker mapping in frames fallback path.
+- Fix from_fbs header detection to use fbf_parse_header.
+- Fix decoder_settings to not swallow errors from valid decoders.
+- Use fbd_decode return value to trim markers array.
+- Drop support for Python 3.11.
 
 2026.2.6
 
@@ -84,7 +97,7 @@ Notes
 
 The API is not stable yet and might change between revisions.
 
-Python <= 3.10 is no longer supported. 32-bit versions are deprecated.
+Python <= 3.11 is no longer supported. 32-bit versions are deprecated.
 
 The latest Microsoft Visual C++ Redistributable for Visual Studio 2015-2022
 is required on Windows.
@@ -108,10 +121,11 @@ Read a FLIM lifetime image and metadata from an FBD file:
 
 .. code-block:: python
 
-    >>> with FbdFile('tests/data/flimbox_data$CBCO.fbd') as fbd:
+    >>> with FbdFile(
+    ...     'tests/data/flimbox_data$CBCO.fbd', pixel_dwell_time=0.937
+    ... ) as fbd:
     ...     bins, times, markers = fbd.decode()
     ...     image = fbd.asimage()
-    ...
     >>> image.shape
     (1, 2, 256, 256, 64)
     >>> print(bins[0, :2], times[:2], markers[:2])
