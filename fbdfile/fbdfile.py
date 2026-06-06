@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.20
+:Version: 2026.6.6
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -61,16 +61,25 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.5, 3.15.0b2 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.4.1
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.5 (build)
 
 Revisions
 ---------
+
+2026.6.6
+
+- Fix potential file handle leak in FbdFile init.
+- Fix pixel_dwell_time when scanner_line_start > 0.
+- Add options for memory-mapping and locked reading to BinaryFile.
+- Add option to memory-map FBD files.
+- Drop support for numpy 2.0 (SPEC0).
+- Support Python 3.15.
 
 2026.3.20
 
@@ -124,14 +133,29 @@ Notes
 
 The API is not stable yet and might change between revisions.
 
-Python <= 3.11 is no longer supported. 32-bit versions are deprecated.
-
 The latest Microsoft Visual C++ Redistributable for Visual Studio 2015-2022
 is required on Windows.
 
-The FLIMbox formats are not documented and might change arbitrarily.
+The FLIMbox formats are undocumented and may vary between software and
+firmware revisions.
 This implementation is based on reverse engineering existing files.
 No guarantee can be made as to the correctness of code and documentation.
+
+FBD (FLIMbox data) files contain a raw stream of encoded 16-bit or 32-bit
+words produced by the FLIMbox FPGA. Some newer files contain embedded firmware
+and acquisition headers before the encoded data stream. Legacy-format files
+have no header; acquisition settings are inferred from a 4-character tag in
+the filename that encodes frame size, pixel dwell time, FLIMbox configuration
+(time windows, channels, and harmonics), and scanner type.
+
+FBF (FLIMbox firmware) files contain a NULL-terminated ASCII string of
+slash-separated key=value pairs followed by the binary FPGA firmware.
+They may be embedded at the start of an FBD file or distributed as standalone
+files.
+
+FBS.XML files are XML settings files written by ISS VistaVision that may
+accompany FBD files and provide acquisition parameters such as frame size,
+pixel dwell time, scanner, and laser settings.
 
 `SimFCS <https://www.lfd.uci.edu/globals/>`_, a.k.a. Globals for Images,
 is software for fluorescence image acquisition, analysis, and simulation,
@@ -168,7 +192,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.3.20'
+__version__ = '2026.6.6'
 
 __all__ = [
     'FbdFile',
@@ -185,10 +209,12 @@ __all__ = [
 import contextlib
 import io
 import logging
+import mmap
 import os
 import re
 import struct
 import sys
+import threading
 import warnings
 from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar, final, override
@@ -198,7 +224,7 @@ if TYPE_CHECKING:
     from types import TracebackType
     from typing import IO, Any, Literal, Self
 
-    from numpy.typing import ArrayLike, NDArray
+    from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 import numpy
 
@@ -219,6 +245,16 @@ class BinaryFile:
             File open mode if ``file`` is a file name.
             If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
+
+    Notes:
+        Memory mapping can improve random-access read performance on large
+        files or repeated reads of the same file regions by reducing syscall
+        overhead and data copying.
+        For sequential one-pass reads, regular buffered I/O may be faster.
 
     Raises:
         TypeError:
@@ -230,10 +266,13 @@ class BinaryFile:
     """
 
     _fh: IO[bytes]
+    _mm: mmap.mmap | None
+    _mv: memoryview | None  # view of _mm
     _path: str  # absolute path of file
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
+    _lock: contextlib.AbstractContextManager[Any]
     _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
     def __init__(
@@ -242,12 +281,16 @@ class BinaryFile:
         /,
         *,
         mode: Literal['r', 'r+'] | None = None,
+        memmap: bool = False,
     ) -> None:
 
+        self._mm = None
+        self._mv = None
         self._path = ''
         self._name = 'Unnamed'
         self._close = False
         self._closed = False
+        self._lock = contextlib.nullcontext()
 
         if isinstance(file, (str, os.PathLike)):
             ext = os.path.splitext(file)[-1].lower()
@@ -260,7 +303,7 @@ class BinaryFile:
                 if mode[-1:] == 'b':
                     # accept 'rb'/'r+b'
                     mode = mode[:-1]  # type: ignore[assignment]
-                if mode not in ('r', 'r+'):
+                if mode not in {'r', 'r+'}:
                     msg = f'invalid {mode=!r}'
                     raise ValueError(msg)
             self._path = os.path.abspath(file)
@@ -311,6 +354,23 @@ class BinaryFile:
         else:
             self._name = type(file).__name__
 
+        if memmap:
+            _fh: Any = self._fh
+            if isinstance(_fh, mmap.mmap):
+                self._mm = _fh
+                self._mv = memoryview(self._mm)
+            else:
+                try:
+                    access = (
+                        mmap.ACCESS_WRITE
+                        if self._fh.writable()
+                        else mmap.ACCESS_READ
+                    )
+                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
+                    self._mv = memoryview(self._mm)
+                except OSError:
+                    pass
+
     @property
     def filehandle(self) -> IO[bytes]:
         """File handle."""
@@ -318,17 +378,17 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Absolute path to file, or empty string if unavailable."""
+        """Absolute path to file, or empty string if no path is available."""
         return self._path
 
     @property
     def filename(self) -> str:
-        """Name of file, or empty if no path is available."""
+        """Basename of file path, or empty string if no path is available."""
         return os.path.basename(self._path)
 
     @property
     def dirname(self) -> str:
-        """Directory containing file, or empty if no path is available."""
+        """Directory containing file, or empty string if no path available."""
         return os.path.dirname(self._path)
 
     @property
@@ -346,6 +406,159 @@ class BinaryFile:
         return {'name': self.name, 'filepath': self.filepath}
 
     @property
+    def lock(self) -> contextlib.AbstractContextManager[Any]:
+        """Lock for thread-safe file access."""
+        return self._lock
+
+    def set_lock(self, enabled: bool, /) -> None:  # noqa: FBT001
+        """Enable or disable thread-safe file access.
+
+        Parameters:
+            enabled:
+                If true, use a threading.RLock, else a no-op lock.
+                Has no effect when memory-mapped I/O is active.
+
+        """
+        if self._mm is not None:
+            return
+        self._lock = threading.RLock() if enabled else contextlib.nullcontext()
+
+    def _write_at(
+        self, offset: int, data: bytes | bytearray | memoryview, /
+    ) -> None:
+        """Write bytes to file at given offset.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            data: Data to write.
+
+        """
+        if self._mm is not None and self.writable:
+            # writable mmap: direct slice write, no cursor movement
+            self._mm[offset : offset + len(data)] = data
+        else:
+            with self._lock:
+                self._fh.seek(offset)
+                self._fh.write(data)
+
+    def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
+        """Read bytes from file at given offset.
+
+        For memory-mapped files, returned bytes are exposed as a
+        ``memoryview`` of the mapping. Keeping that view alive may keep
+        the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            size: Number of bytes to read.
+
+        """
+        mv = self._mv
+        if mv is not None:
+            return mv[offset : offset + size]
+        fh = self._fh
+        with self._lock:
+            fh.seek(offset)
+            return fh.read(size)
+
+    def _read_array(
+        self,
+        offset: int,
+        count: int,
+        dtype: DTypeLike,
+        *,
+        copy: bool = False,
+        writable: bool = False,
+        truncate: bool | None = False,
+    ) -> NDArray[Any]:
+        """Read numpy array from file at given offset.
+
+        For memory-mapped files, returned data are exposed directly as a
+        NumPy array view of the mapping (zero copy). Keeping that array alive
+        may keep the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset:
+                Byte offset from start of file.
+            count:
+                Number of elements to read. If ``-1``, read to end of file.
+            dtype:
+                Array element type.
+            copy:
+                If true, always return a detached copy in main memory.
+                For memory-mapped files, bypass the direct-view fast path.
+            writable:
+                By default, return read-only array from memory-mapped file.
+                Prevents accidental modification of underlying writable file.
+                Has no effect for non-memory-mapped files (always writeable).
+            truncate:
+                Allow partial reads of array.
+                If None, log error on partial read.
+
+        """
+        dtype = numpy.dtype(dtype)
+        itemsize = dtype.itemsize
+        if offset < 0:
+            msg = f'{offset=} < 0'
+            raise ValueError(msg)
+        if count < -1:
+            msg = f'{count=} < -1'
+            raise ValueError(msg)
+
+        mv = self._mv
+        if mv is not None:
+            if count == -1:
+                count = max(0, (len(mv) - offset) // itemsize)
+            nbytes = count * itemsize
+            size = min(nbytes, max(0, len(mv) - offset))
+            n = size - size % itemsize
+            array = numpy.frombuffer(
+                mv[offset : offset + n],
+                dtype,
+            )
+            if copy:
+                array = array.copy()
+            elif not writable and array.flags.writeable:
+                array.flags.writeable = False
+        elif count > -1:
+            fh = self._fh
+            nbytes = count * itemsize
+            array = numpy.empty(count, dtype)
+            with self._lock:
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+        else:
+            fh = self._fh
+            with self._lock:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                count = max(0, (size - offset) // itemsize)
+                nbytes = count * itemsize
+                array = numpy.empty(count, dtype)
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+
+        if n != nbytes:
+            array = array[: n // itemsize]
+            msg = f'expected {count} items, got {n // itemsize}'
+            if truncate is None:
+                logging.getLogger(__name__.split('.', 1)[0]).error(msg)
+            elif not truncate:
+                raise ValueError(msg)
+
+        return array
+
+    @property
+    def writable(self) -> bool:
+        """File is open for writing."""
+        return self._fh.writable()
+
+    @property
+    def memmapped(self) -> bool:
+        """File is memory-mapped."""
+        return self._mm is not None
+
+    @property
     def closed(self) -> bool:
         """File is closed."""
         return self._closed
@@ -353,6 +566,10 @@ class BinaryFile:
     def close(self) -> None:
         """Close file."""
         self._closed = True  # always report file as closed
+        self._mv = None  # do not release(), threads may hold local refs
+        if self._mm is not None and self._mm is not self._fh:  # type: ignore[comparison-overlap]
+            with contextlib.suppress(Exception):
+                self._mm.close()
         if self._close:
             with contextlib.suppress(Exception):
                 self._fh.close()
@@ -421,6 +638,14 @@ class FbdFile(BinaryFile):
     Parameters:
         file:
             File name or seekable binary stream.
+        mode:
+            File open mode if ``file`` is a file name.
+            If not specified, defaults to ``'r'``. Files are always opened
+            in binary mode.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
         code:
             Four-character string, encoding frame size (1st char),
             pixel dwell time (2nd char), number of sampling windows
@@ -458,6 +683,13 @@ class FbdFile(BinaryFile):
             Number of pixels in each line, including retrace.
         scanner_line_start:
             Index of first valid pixel in scan line.
+            For FBD files with binary headers, this is read from the
+            ``x_starting_pixel`` field. SimFCS internally applies an
+            additional per-dwell-time hardware trigger-latency correction
+            that shifts the effective first pixel. This correction is not
+            stored in the FBD file. Users who need exact agreement with
+            SimFCS output should determine the corrected effective
+            ``scanner_line_start`` and pass it as an override parameter.
         scanner_frame_start:
             Index of first valid pixel after marker.
         scanner:
@@ -784,6 +1016,7 @@ class FbdFile(BinaryFile):
         /,
         *,
         mode: Literal['r', 'r+'] | None = None,
+        memmap: bool = False,
         code: str = '',
         decoder: str | None = None,
         fbf: dict[str, Any] | None = None,
@@ -802,7 +1035,7 @@ class FbdFile(BinaryFile):
         scanner: str = '',
         synthesizer: str = '',
     ) -> None:
-        super().__init__(file, mode=mode)
+        super().__init__(file, mode=mode, memmap=memmap)
 
         self.header = None
         self.code = code
@@ -827,62 +1060,67 @@ class FbdFile(BinaryFile):
         self._effective_header_t = None
         self._pixel_dwell_time_from_table = False
 
-        if not self.code:
-            match = re.search(
-                r'.*\$([A-Z][A-Z][A-Z0-9][A-Z])\.fbd',
-                self.filename,
-                re.IGNORECASE,
-            )
-            if match is None:
-                self.code = 'CFCS'  # old FLIMbox file ?
-                warnings.warn(
-                    'FbdFile: failed to parse code from file name. '
-                    f'Using {self.code!r}',
-                    stacklevel=2,
+        with contextlib.ExitStack() as stack:
+            stack.callback(self.close)
+
+            if not self.code:
+                match = re.search(
+                    r'.*\$([A-Z][A-Z][A-Z0-9][A-Z])\.fbd',
+                    self.filename,
+                    re.IGNORECASE,
                 )
+                if match is None:
+                    self.code = 'CFCS'  # old FLIMbox file ?
+                    warnings.warn(
+                        'FbdFile: failed to parse code from file name. '
+                        f'Using {self.code!r}',
+                        stacklevel=2,
+                    )
+                else:
+                    self.code = match.group(1)
+
+            assert len(self.code) == 4, code
+
+            if self._from_fbs():  # and self.code[2].isnumeric()
+                pass
+            elif self.code[2] == '0':
+                self._from_header()
             else:
-                self.code = match.group(1)
+                self._from_code()
 
-        assert len(self.code) == 4, code
+            assert self.windows >= 0
+            assert self.channels >= 0
+            assert self.harmonics >= 0
 
-        if self._from_fbs():  # and self.code[2].isnumeric()
-            pass
-        elif self.code[2] == '0':
-            self._from_header()
-        else:
-            self._from_code()
+            if self.decoder is None:
+                bytes_ = 4 if self.is_32bit else 2
+                self.decoder = f'_b{bytes_}w{self.windows}c{self.channels}'
+                if (
+                    self.windows == 16
+                    and self.channels == 4
+                    and self.fbf is not None
+                    and self.fbf.get('time', '').endswith('Bit')
+                ):
+                    t = self.fbf['time'][:-3]
+                    self.decoder += f't{t}'
 
-        assert self.windows >= 0
-        assert self.channels >= 0
-        assert self.harmonics >= 0
+            if self.pdiv <= 0:
+                with contextlib.suppress(AttributeError):
+                    self.pdiv = max(1, self.pmax // 64)
+            assert self.pdiv >= 0
 
-        if self.decoder is None:
-            bytes_ = 4 if self.is_32bit else 2
-            self.decoder = f'_b{bytes_}w{self.windows}c{self.channels}'
-            if (
-                self.windows == 16
-                and self.channels == 4
-                and self.fbf is not None
-                and self.fbf.get('time', '').endswith('Bit')
-            ):
-                t = self.fbf['time'][:-3]
-                self.decoder += f't{t}'
-
-        if self.pdiv <= 0:
-            with contextlib.suppress(AttributeError):
-                self.pdiv = max(1, self.pmax // 64)
-        assert self.pdiv >= 0
-
-        for attr in self._attributes:
-            value = getattr(self, attr)
-            if isinstance(value, (int, float)):
-                if value < 0:
+            for attr in self._attributes:
+                value = getattr(self, attr)
+                if isinstance(value, (int, float)):
+                    if value < 0:
+                        msg = f'{attr!r} not initialized'
+                        raise ValueError(msg)
+                elif not value:
+                    # empty str
                     msg = f'{attr!r} not initialized'
                     raise ValueError(msg)
-            elif not value:
-                # empty str
-                msg = f'{attr!r} not initialized'
-                raise ValueError(msg)
+
+            stack.pop_all()  # initialization succeeded; do not close file
 
     def _from_fbs(self) -> bool:
         """Initialize instance from VistaVision settings file."""
@@ -939,15 +1177,13 @@ class FbdFile(BinaryFile):
         if self.frame_size < 0:
             self.frame_size = scn['XPixels']
 
-        self._fh.seek(0)
         try:
-            buf = self._fh.read(1024).split(b'\x00', 1)[0]
+            buf = bytes(self._read_at(0, 1024)).split(b'\x00', 1)[0]
             if fbf_parse_header(bytes2str(buf)):
                 # FBF firmware header detected; encoded data starts at 33K
                 self._data_offset = 33792
         except (UnicodeDecodeError, ValueError):
             pass
-        self._fh.seek(0)
         return True
 
     def _from_code(self) -> None:
@@ -1026,8 +1262,7 @@ class FbdFile(BinaryFile):
         self.is_32bit = '32fifo' in self.fbf['decoder']
 
         # the next 31kB contain the binary file header
-        self._fh.seek(1024)
-        self.header = hdr = numpy.fromfile(self._fh, self._header_t, 1)[0]
+        self.header = hdr = self._read_array(1024, 1, self._header_t)[0]
         if hdr['owner'] != 0:
             msg = f'unknown header format {hdr["owner"]!r}'
             raise ValueError(msg)
@@ -1044,9 +1279,8 @@ class FbdFile(BinaryFile):
             self._effective_header_t = (
                 FbdFile._header_t[:20] + FbdFile._header_t[28:]
             )
-            self._fh.seek(1024)
-            self.header = hdr = numpy.fromfile(
-                self._fh, self._effective_header_t, 1
+            self.header = hdr = self._read_array(
+                1024, 1, self._effective_header_t
             )[0]
         else:
             self._effective_header_t = FbdFile._header_t
@@ -1099,10 +1333,24 @@ class FbdFile(BinaryFile):
                         self.frame_size = frame_size
                         break
             if self.pixel_dwell_time < 0:
-                self.pixel_dwell_time = float(
-                    hdr['frame_time']
-                    / (self.frame_size * self.scanner_line_length)
-                )
+                if self.scanner_line_start > 0 and hdr['line_time'] > 1.0:
+                    # Pre-scan lead-in present (e.g. IOTech, SimFCS-native):
+                    # line_time accurately measures one complete scan-line
+                    # cycle including the lead-in, so line_time / line_length
+                    # gives the exact pixel dwell time. frame_time / line_time
+                    # equals frame_size - 1 for these scanners because SimFCS
+                    # stores frame_time = (frame_size-1) * line_length * dt.
+                    self.pixel_dwell_time = float(
+                        hdr['line_time'] / self.scanner_line_length
+                    )
+                else:
+                    # No pre-scan lead-in (e.g. Zeiss): frame_time is the
+                    # more accurate source, and frame_time = frame_size *
+                    # line_length * dt for these scanners.
+                    self.pixel_dwell_time = float(
+                        hdr['frame_time']
+                        / (self.frame_size * self.scanner_line_length)
+                    )
         else:
             if self.frame_size < 0:
                 try:
@@ -1742,15 +1990,8 @@ class FbdFile(BinaryFile):
         del kwargs  # unused
         dtype = numpy.dtype('<u4' if self.is_32bit else '<u2')
         if data is None:
-            self._fh.seek(self._data_offset + skip_words * dtype.itemsize, 0)
-            try:
-                data = numpy.fromfile(self._fh, dtype=dtype, count=word_count)
-            except io.UnsupportedOperation:
-                if word_count < 0:
-                    raw = self._fh.read()
-                else:
-                    raw = self._fh.read(dtype.itemsize * word_count)
-                data = numpy.frombuffer(raw, dtype=dtype)
+            offset = self._data_offset + skip_words * dtype.itemsize
+            data = self._read_array(offset, word_count, dtype)
         elif skip_words > 0 or word_count >= 0:
             if word_count < 0:
                 data = data[skip_words:]
@@ -2246,10 +2487,10 @@ class FbdFile(BinaryFile):
         )
         return indent(*info)
 
-    def plot(self, *, show: bool = True) -> None:
+    def plot(self, *, show: bool = True, verbose: bool = False) -> None:
         """Plot histogram and image for all channels."""
         from matplotlib import pyplot
-        from tifffile import imshow
+        from tifffile import Timer, imshow
 
         assert self.pmax is not None
         assert self.pdiv is not None
@@ -2268,7 +2509,12 @@ class FbdFile(BinaryFile):
         ax.legend()
         pyplot.tight_layout()
 
+        timer = Timer()
         image = self.asimage((bins, times, markers))
+        timer.stop()
+        if verbose:
+            timer.print('Duration:')
+
         if image.sum(dtype=numpy.uint32) > 0:
             img = image.sum(axis=(0, -1), dtype=numpy.uint32)
             imshow(
@@ -2974,9 +3220,9 @@ def main() -> int:
         if files:
             if isinstance(files, (list, tuple)):
                 files = files[0]
-            with FbdFile(files) as fbd:
+            with FbdFile(files, memmap=True) as fbd:
                 print(fbd)  # noqa: T201
-                fbd.plot()
+                fbd.plot(verbose=True)
 
     if len(sys.argv) == 1:
         sys.argv.append('view')
