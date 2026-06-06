@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.20
+:Version: 2026.6.6
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -34,16 +34,25 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.3.1
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.5, 3.15.0b2 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.4.1
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.4 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.2.5 (build)
 
 Revisions
 ---------
+
+2026.6.6
+
+- Fix potential file handle leak in FbdFile init.
+- Fix pixel_dwell_time when scanner_line_start > 0.
+- Add options for memory-mapping and locked reading to BinaryFile.
+- Add option to memory-map FBD files.
+- Drop support for numpy 2.0 (SPEC0).
+- Support Python 3.15.
 
 2026.3.20
 
@@ -97,14 +106,29 @@ Notes
 
 The API is not stable yet and might change between revisions.
 
-Python <= 3.11 is no longer supported. 32-bit versions are deprecated.
-
 The latest Microsoft Visual C++ Redistributable for Visual Studio 2015-2022
 is required on Windows.
 
-The FLIMbox formats are not documented and might change arbitrarily.
+The FLIMbox formats are undocumented and may vary between software and
+firmware revisions.
 This implementation is based on reverse engineering existing files.
 No guarantee can be made as to the correctness of code and documentation.
+
+FBD (FLIMbox data) files contain a raw stream of encoded 16-bit or 32-bit
+words produced by the FLIMbox FPGA. Some newer files contain embedded firmware
+and acquisition headers before the encoded data stream. Legacy-format files
+have no header; acquisition settings are inferred from a 4-character tag in
+the filename that encodes frame size, pixel dwell time, FLIMbox configuration
+(time windows, channels, and harmonics), and scanner type.
+
+FBF (FLIMbox firmware) files contain a NULL-terminated ASCII string of
+slash-separated key=value pairs followed by the binary FPGA firmware.
+They may be embedded at the start of an FBD file or distributed as standalone
+files.
+
+FBS.XML files are XML settings files written by ISS VistaVision that may
+accompany FBD files and provide acquisition parameters such as frame size,
+pixel dwell time, scanner, and laser settings.
 
 `SimFCS <https://www.lfd.uci.edu/globals/>`_, a.k.a. Globals for Images,
 is software for fluorescence image acquisition, analysis, and simulation,
