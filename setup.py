@@ -10,8 +10,6 @@ import sysconfig
 import numpy
 from setuptools import Extension, setup
 
-buildnumber = ''
-
 DEBUG = bool(os.environ.get('CG_DEBUG', ''))
 LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
 
@@ -59,7 +57,6 @@ with open('fbdfile/fbdfile.py', encoding='utf-8') as fh:
     code = fh.read()
 
 version = search(r"__version__ = '(.*?)'", code).replace('.x.x', '.dev0')
-version += ('.' + buildnumber) if buildnumber else ''
 
 description = search(r'"""(.*)\.(?:\r\n|\r|\n)', code)
 
@@ -155,7 +152,7 @@ setup(
     project_urls={
         'Bug Tracker': 'https://github.com/cgohlke/fbdfile/issues',
         'Source Code': 'https://github.com/cgohlke/fbdfile',
-        # 'Documentation': 'https://',
+        'Documentation': 'https://www.cgohlke.com/docs/fbdfile/',
     },
     packages=['fbdfile'],
     package_data={'fbdfile': ['py.typed']},
@@ -166,7 +163,7 @@ setup(
         ]
     },
     python_requires='>=3.12',
-    install_requires=['numpy>=2.0'],
+    install_requires=['numpy>=2.1'],
     extras_require={'all': ['tifffile', 'matplotlib', 'click']},
     ext_modules=ext_modules,
     options=setup_options,
@@ -181,5 +178,6 @@ setup(
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
+        'Programming Language :: Python :: 3.15',
     ],
 )
