@@ -11,9 +11,10 @@ import numpy
 from setuptools import Extension, setup
 
 DEBUG = bool(os.environ.get('CG_DEBUG', ''))
-LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
+LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in {'1', 'true'}
+GIL_DISABLED = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
 
-if LIMITED_API and not sysconfig.get_config_var('Py_GIL_DISABLED'):
+if LIMITED_API and not GIL_DISABLED:
     py_limited_api = True
     define_macros = [
         ('Py_LIMITED_API', 0x030C0000),
@@ -105,6 +106,10 @@ include_dirs = [numpy.get_include()]
 if DEBUG:
     extra_compile_args = ['/Zi', '/Od']
     extra_link_args = ['-debug:full']
+elif 'PYODIDE' in os.environ or 'PYODIDE_ROOT' in os.environ:
+    # disable OpenMP; no threading in Pyodide
+    extra_compile_args = []
+    extra_link_args = []
 elif sys.platform == 'win32':
     extra_compile_args = ['/openmp']
     extra_link_args = []
@@ -130,7 +135,7 @@ ext_modules = [
         define_macros=[
             *define_macros,
             # ('CYTHON_TRACE_NOGIL', '1'),
-            ('NPY_NO_DEPRECATED_API', 'NPY_2_0_API_VERSION'),
+            ('NPY_NO_DEPRECATED_API', 'NPY_2_1_API_VERSION'),
         ],
         py_limited_api=py_limited_api,
         extra_compile_args=extra_compile_args,
