@@ -169,7 +169,7 @@ setup(
     },
     python_requires='>=3.12',
     install_requires=['numpy>=2.1'],
-    extras_require={'all': ['tifffile', 'matplotlib', 'click']},
+    extras_require={'all': ['tifffile', 'matplotlib', 'click', 'xarray']},
     ext_modules=ext_modules,
     options=setup_options,
     platforms=['any'],
