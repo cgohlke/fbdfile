@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2026.8.8
+:Version: 2026.8.30
 
 """
 
@@ -44,7 +44,6 @@ import warnings
 
 import numpy
 import pytest
-from lfdfiles import SimfcsB64
 from numpy.testing import assert_almost_equal, assert_array_equal
 
 import fbdfile
@@ -57,6 +56,7 @@ from fbdfile import (
     fbd_to_b64,
     fbf_read,
     fbs_read,
+    imread,
     sflim_decode,
 )
 from fbdfile._fbdfile import sflim_decode_photons
@@ -77,13 +77,6 @@ try:
     import fsspec
 except ImportError:
     fsspec = None  # type: ignore[assignment]
-
-try:
-    # TODO: newer lfdfiles removed FLIMbox support
-    import lfdfiles
-    from lfdfiles import FlimboxFbd  # type: ignore[attr-defined]
-except ImportError:
-    lfdfiles = None  # type: ignore[assignment]
 
 try:
     import phasorpy
@@ -572,6 +565,42 @@ def test_fbd_error():
         FbdFile('nonexistingfile.fbd')
     with pytest.raises(ValueError):
         FbdFile(filename)
+
+
+@pytest.mark.parametrize('asxarray', [False, True])
+def test_imread(asxarray):
+    """Test imread function."""
+    xarray = pytest.importorskip('xarray') if asxarray else None
+
+    filename = DATA / 'flimbox_data$CBCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    image = imread(
+        filename,
+        memmap=True,
+        pixel_dwell_time=0.937,
+        word_count=500000,
+        skip_words=1900000,
+        select_frames=slice(None),
+        aspect_range=(0.8, 1.2),
+        frame_cluster=0,
+        refine=False,
+        integrate_frames=1,
+        square_frame=True,
+        asxarray=asxarray,
+    )
+
+    assert image.shape == (1, 2, 256, 256, 64)
+    assert image.dtype == numpy.uint16
+    counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
+    assert numpy.asarray(counts).tolist() == [72988, 0]
+
+    if xarray is not None:
+        assert isinstance(image, xarray.DataArray)
+        assert image.coords['H'][-1] == pytest.approx(6.18501054)
+        assert image.attrs['laser_factor'] == 1.0
+        assert image.attrs['pixel_dwell_time'] == 0.937
 
 
 @pytest.mark.parametrize('memmap', [False, True])
@@ -1136,6 +1165,16 @@ def test_fbd_ei0t_auto_refine():
             fbd.refine_settings(records)
         assert fbd.pixel_dwell_time == 100.0  # unchanged
 
+    # user-supplied laser_factor is protected: refine_settings skips update
+    with FbdFile(filename, laser_factor=1.000281) as fbd:
+        assert fbd._laser_factor_provided
+        records = fbd.decode()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            result = fbd.refine_settings(records)
+        assert fbd.laser_factor == 1.000281  # unchanged because user-supplied
+        assert result is False
+
     # table-derived dwell can be corrected: simulate by setting the flag
     with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
         fbd._pixel_dwell_time_from_table = True
@@ -1438,6 +1477,44 @@ def test_read_fbs(stringio):
     )
 
 
+def test_fbd_asxarray():
+    """Test asxarray on XX2X FBD file with FBS.XML settings."""
+    xarray = pytest.importorskip('xarray')
+
+    filename = DATA / 'FBS/TESTFILE$XX2X.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename) as fbd:
+        assert fbd.fbs is not None
+        assert fbd.fbs['ScanParams']['Channels'] == 2
+        assert fbd.windows == 8
+        assert fbd.channels == 2
+
+        xarr = fbd.asxarray(refine=False)
+
+    assert isinstance(xarr, xarray.DataArray)
+    assert xarr.dims == ('T', 'C', 'Y', 'X', 'H')
+    assert xarr.shape == (1, 2, 254, 256, 64)
+    assert xarr.dtype == numpy.uint16
+    assert list(xarr.coords) == ['Y', 'X', 'H']
+    assert float(xarr.coords['Y'][0]) == pytest.approx(-150.0)
+    assert float(xarr.coords['Y'][-1]) == pytest.approx(150.0)
+    assert float(xarr.coords['X'][0]) == pytest.approx(-150.0)
+    assert float(xarr.coords['X'][-1]) == pytest.approx(150.0)
+    assert float(xarr.coords['H'][0]) == pytest.approx(0.0)
+    assert float(xarr.coords['H'][-1]) == pytest.approx(6.185011, rel=1e-4)
+    assert xarr.attrs['windows'] == 8
+    assert xarr.attrs['channels'] == 2
+    assert xarr.attrs['frame_size'] == 256
+    assert xarr.attrs['pmax'] == 64
+    assert xarr.attrs['pdiv'] == 1
+    assert xarr.attrs['laser_frequency'] == 40023631.0
+    assert xarr.attrs['laser_factor'] == pytest.approx(1.0)
+    assert xarr.attrs['pixel_dwell_time'] == pytest.approx(100.0)
+    assert xarr.attrs['scanner'] == 'ISS Scanning Mirror'
+
+
 def test_sflim_decode():
     """Test sflim_decode and sflim_decode_photons functions."""
     filename = DATA / '20210123488_100x_NSC_166_TMRM_4_zoom4000_L115.bin'
@@ -1468,6 +1545,8 @@ def test_sflim_decode():
 
 def test_fbd_to_b64():
     """Test fbd_to_b64 function."""
+    lfdfiles = pytest.importorskip('lfdfiles')
+
     filename = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
     if not os.path.exists(filename):
         pytest.skip(f'{filename!r} not found')
@@ -1490,11 +1569,11 @@ def test_fbd_to_b64():
         show=SHOW,
     )
     if not SHOW:
-        with SimfcsB64(
+        with lfdfiles.SimfcsB64(
             DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd_c00t0000.b64'
         ) as b64:
-            assert b64.asarray().sum(dtype=numpy.int32) == 4293221  # 4312585
-        with SimfcsB64(
+            assert b64.asarray().sum(dtype=numpy.int32) == 4293260
+        with lfdfiles.SimfcsB64(
             DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd_c01t0000.b64'
         ) as b64:
             assert b64.asarray().sum() == 0
@@ -1525,113 +1604,6 @@ def test_xml2dict():
     d = xml2dict(xml, prefix=('a_', 'b_'), sep='')['root']
     assert d['ints'] == '-1,2'
     assert d['floats'] == '1.0, -2.0'
-
-
-@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
-def test_lfdfiles_doctest():
-    """Test lfdfiles.FlimboxFbd class doctest."""
-    from lfdfiles import FlimboxFbd
-
-    filename = DATA / 'flimbox_data$CBCO.fbd'
-    with FlimboxFbd(filename) as f:
-        bins, times, markers = f.decode(word_count=500000, skip_words=1900000)
-        hist = [numpy.bincount(b[b >= 0]) for b in bins]
-
-        assert isinstance(f.laser_frequency, float)
-        assert f.laser_frequency == 20000000.0
-        assert bins[0, :2].tolist() == [53, 51]
-        assert times[:2].tolist() == [0, 42]
-        assert markers.tolist() == [44097, 124815]
-        assert numpy.argmax(hist[0]) == 53
-
-
-@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
-def test_lfdfiles_fbd():
-    """Test lfdfiles.FlimboxFbd class."""
-    from lfdfiles import FlimboxFbd
-
-    filename = DATA / 'PhasorPy/cumarinech1_780LAURDAN_000$CC0Z.fbd'
-    if not os.path.exists(filename):
-        pytest.skip(f'{filename!r} not found')
-
-    with FlimboxFbd(filename, laser_factor=0.99167) as fbd:
-        str(fbd)
-        assert fbd.decoder == '_b2w4c2'
-        assert fbd.laser_factor == 0.99167
-        assert fbd.laser_frequency == 40000000.0
-        assert fbd.pixel_dwell_time == 25.21  # computed from header frame_time
-        assert fbd.header['laser_factor'] == 0.9955791
-
-        bins, times, markers = fbd.decode()
-        assert bins.shape == (2, 8380418)
-        assert times.shape == (8380418,)
-        assert markers.shape == (26,)
-
-        bins = fbd.asarray()
-        assert bins.shape == (2, 8380418)
-        assert bins.dtype == numpy.int8
-        assert bins.sum(dtype=numpy.uint32) == 117398019
-
-        image = fbd.asimage((bins, times, markers), None)
-        assert image.shape == (1, 2, 256, 256, 64)
-        assert image.dtype == numpy.uint16
-        assert image.sum(dtype=numpy.uint64) == 4293221
-
-        with pytest.raises(AttributeError):
-            _ = fbd.non_existent
-
-        if SHOW:
-            fbd.show(cmap='turbo')
-
-
-@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
-def test_lfdfiles_fbf():
-    """Test lfdfiles.FlimboxFbf class."""
-    from lfdfiles import FlimboxFbf
-
-    filename = DATA / 'flimbox_firmware.fbf'
-    if not os.path.exists(filename):
-        pytest.skip(f'{filename!r} not found')
-
-    with FlimboxFbf(filename, firmware=True) as fbf:
-        assert fbf['extclk']
-        assert fbf['channels'] == 2
-        assert fbf['windows'] == 16
-        assert fbf['clkout'] == 10000000
-        assert fbf['synchout'] == 10000000
-        assert fbf['decoder'] == '16w2'
-        assert fbf['fifofeedback'] == 0
-        assert fbf['secondharmonic'] == 0
-        assert fbf['optimalclk'] == 10000000
-        assert fbf['comment'].startswith('Version 1.1.0 added channel')
-        assert fbf.firmware()[:4] == b'(\xecXP'
-
-
-@pytest.mark.skipif(lfdfiles is None, reason='lfdfiles not installed')
-def test_lfdfiles_fbs():
-    """Test lfdfiles.FlimboxFbs class."""
-    from lfdfiles import FlimboxFbs
-
-    filename = DATA / 'FBS/TESTFILE.fbs.xml'
-    if not os.path.exists(filename):
-        pytest.skip(f'{filename!r} not found')
-
-    with FlimboxFbs(filename) as fbs:
-        str(fbs)
-        assert fbs['Comments'].startswith(
-            'File created by ISS Vista software (Version: 4.2.597.0)'
-        )
-        assert fbs['DateTimeStamp'] == '2025-02-05T18:32:36.7762228-06:00'
-        assert fbs['FirmwareParams']['ChannelMapping'] == (0, 1)
-        assert fbs['FirmwareParams']['DecoderName'] == '8w'
-        assert fbs['FirmwareParams']['Windows'] == 8
-        assert fbs['FirmwareParams']['Use2ndHarmonic'] is False
-        assert fbs['ScanParams']['Channels'] == 2
-        assert fbs['ScanParams']['ExcitationFrequency'] == 40023631
-        assert fbs['ScanParams']['FrameRepeat'] == 10
-        assert fbs['SystemSettings']['fromComments'].startswith(
-            '[Excitation Laser]\n'
-        )
 
 
 @pytest.mark.skipif(phasorpy is None, reason='phasorpy not installed')
