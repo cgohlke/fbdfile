@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.8.8
+:Version: 2026.8.30
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -63,14 +63,21 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (optional)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.7.31 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.4.2
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.23 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.5.0
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.9 (build)
 
 Revisions
 ---------
+
+2026.8.30
+
+- Do not refine user-provided laser_factor (breaking; see PhasorPy issue 372).
+- Add FbdFile.asxarray method (requires xarray).
+- Add imread convenience function.
 
 2026.8.8
 
@@ -200,7 +207,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.8.8'
+__version__ = '2026.8.30'
 
 __all__ = [
     'FbdFile',
@@ -211,6 +218,7 @@ __all__ = [
     'fbd_to_b64',
     'fbf_read',
     'fbs_read',
+    'imread',
     'sflim_decode',
 ]
 
@@ -225,7 +233,7 @@ import sys
 import threading
 import warnings
 from functools import cached_property
-from typing import TYPE_CHECKING, ClassVar, final, override
+from typing import TYPE_CHECKING, ClassVar, final, overload, override
 
 if TYPE_CHECKING:
     from collections.abc import Container, Sequence
@@ -233,10 +241,233 @@ if TYPE_CHECKING:
     from typing import IO, Any, Literal, Self
 
     from numpy.typing import ArrayLike, DTypeLike, NDArray
+    from xarray import DataArray
 
 import numpy
 
 from ._fbdfile import fbd_decode, fbd_histogram, sflim_decode
+
+
+@overload
+def imread(
+    file: str | os.PathLike[str],
+    /,
+    *,
+    memmap: bool = ...,
+    code: str = ...,
+    decoder: str | None = ...,
+    fbf: dict[str, Any] | None = ...,
+    fbs: dict[str, Any] | None = ...,
+    frame_size: int = ...,
+    windows: int = ...,
+    channels: int = ...,
+    harmonics: int = ...,
+    pdiv: int = ...,
+    pixel_dwell_time: float = ...,
+    laser_frequency: float = ...,
+    laser_factor: float = ...,
+    scanner_line_length: int = ...,
+    scanner_line_start: int = ...,
+    scanner_frame_start: int = ...,
+    scanner: str = ...,
+    synthesizer: str = ...,
+    word_count: int = ...,
+    skip_words: int = ...,
+    max_markers: int = ...,
+    integrate_frames: int = ...,
+    square_frame: bool = ...,
+    num_threads: int = ...,
+    select_frames: slice | None = ...,
+    aspect_range: tuple[float, float] = ...,
+    frame_cluster: int = ...,
+    refine: bool | None = ...,
+    asxarray: Literal[True],
+) -> DataArray: ...
+
+
+@overload
+def imread(
+    file: str | os.PathLike[str],
+    /,
+    *,
+    memmap: bool = ...,
+    code: str = ...,
+    decoder: str | None = ...,
+    fbf: dict[str, Any] | None = ...,
+    fbs: dict[str, Any] | None = ...,
+    frame_size: int = ...,
+    windows: int = ...,
+    channels: int = ...,
+    harmonics: int = ...,
+    pdiv: int = ...,
+    pixel_dwell_time: float = ...,
+    laser_frequency: float = ...,
+    laser_factor: float = ...,
+    scanner_line_length: int = ...,
+    scanner_line_start: int = ...,
+    scanner_frame_start: int = ...,
+    scanner: str = ...,
+    synthesizer: str = ...,
+    word_count: int = ...,
+    skip_words: int = ...,
+    max_markers: int = ...,
+    integrate_frames: int = ...,
+    square_frame: bool = ...,
+    num_threads: int = ...,
+    select_frames: slice | None = ...,
+    aspect_range: tuple[float, float] = ...,
+    frame_cluster: int = ...,
+    refine: bool | None = ...,
+    asxarray: Literal[False] = ...,
+) -> NDArray[numpy.uint16]: ...
+
+
+def imread(
+    file: str | os.PathLike[str],
+    /,
+    *,
+    memmap: bool = False,
+    code: str = '',
+    decoder: str | None = None,
+    fbf: dict[str, Any] | None = None,
+    fbs: dict[str, Any] | None = None,
+    frame_size: int = -1,
+    windows: int = -1,
+    channels: int = -1,
+    harmonics: int = -1,
+    pdiv: int = -1,
+    pixel_dwell_time: float = -1.0,
+    laser_frequency: float = -1.0,
+    laser_factor: float = -1.0,
+    scanner_line_length: int = -1,
+    scanner_line_start: int = -1,
+    scanner_frame_start: int = -1,
+    scanner: str = '',
+    synthesizer: str = '',
+    # decode parameters
+    word_count: int = -1,
+    skip_words: int = 0,
+    max_markers: int = 65536,
+    # asimage parameters
+    integrate_frames: int = 1,
+    square_frame: bool = True,
+    num_threads: int = 0,
+    select_frames: slice | None = None,
+    aspect_range: tuple[float, float] = (0.8, 1.2),
+    frame_cluster: int = 0,
+    refine: bool | None = True,
+    asxarray: bool = False,
+) -> NDArray[numpy.uint16] | DataArray:
+    """Return image histogram from FLIMbox data file.
+
+    Parameters:
+        file:
+            File name of FLIMbox data file.
+        memmap:
+            Map file into memory.
+        code:
+            Four-character string encoding frame size, pixel dwell time,
+            FLIMbox configuration, and scanner type.
+            By default, extracted from the file name.
+        decoder:
+            Name of decoder settings function.
+        fbf:
+            FLIMbox firmware header settings.
+        fbs:
+            FLIMbox settings from FBS.XML file.
+        frame_size:
+            Number of pixels in one line scan, excluding retrace.
+        windows:
+            Number of sampling windows used by FLIMbox.
+        channels:
+            Number of channels used by FLIMbox.
+        harmonics:
+            First or second harmonics.
+        pdiv:
+            Divisor to reduce number of entries in phase histogram.
+        pixel_dwell_time:
+            Number of microseconds scanner remains at each pixel.
+        laser_frequency:
+            Laser frequency in Hz.
+        laser_factor:
+            Factor to correct dwell_time/laser_frequency.
+        scanner_line_length:
+            Number of pixels in each line, including retrace.
+        scanner_line_start:
+            Index of first valid pixel in scan line.
+        scanner_frame_start:
+            Index of first valid pixel after marker.
+        scanner:
+            Scanner software or hardware.
+        synthesizer:
+            Synthesizer software or hardware.
+        word_count:
+            Number of data words to process.
+            By default, all words are processed.
+        skip_words:
+            Number of data words to skip at beginning of stream.
+        max_markers:
+            Maximum number of markers expected in data stream.
+        integrate_frames:
+            Specifies which frames to sum. By default, all frames are
+            summed into one. If 0, no frames are summed.
+        square_frame:
+            If True, return square image (frame_size x frame_size),
+            else return full scanner frame.
+        num_threads:
+            Number of OpenMP threads to use for parallelization.
+        select_frames:
+            Specifies which image frames to return.
+            By default, all frames are returned.
+        aspect_range:
+            Minimum and maximum aspect ratios of valid frames.
+        frame_cluster:
+            Index of frame duration cluster to use when
+            calculating correction factor.
+        refine:
+            Refine settings: True=always, None=if needed, False=never.
+        asxarray:
+            Return image as xarray.DataArray instead of numpy.ndarray.
+
+    Returns:
+        Image histogram of shape (number frames, number channels,
+        lines per frame, scanner samples per line, histogram bins)
+
+    """
+    with FbdFile(
+        file,
+        memmap=memmap,
+        code=code,
+        decoder=decoder,
+        fbf=fbf,
+        fbs=fbs,
+        frame_size=frame_size,
+        windows=windows,
+        channels=channels,
+        harmonics=harmonics,
+        pdiv=pdiv,
+        pixel_dwell_time=pixel_dwell_time,
+        laser_frequency=laser_frequency,
+        laser_factor=laser_factor,
+        scanner_line_length=scanner_line_length,
+        scanner_line_start=scanner_line_start,
+        scanner_frame_start=scanner_frame_start,
+        scanner=scanner,
+        synthesizer=synthesizer,
+    ) as fbd:
+        func = fbd.asxarray if asxarray else fbd.asimage
+        return func(
+            integrate_frames=integrate_frames,
+            square_frame=square_frame,
+            num_threads=num_threads,
+            select_frames=select_frames,
+            aspect_range=aspect_range,
+            frame_cluster=frame_cluster,
+            refine=refine,
+            word_count=word_count,
+            skip_words=skip_words,
+            max_markers=max_markers,
+        )
 
 
 class FbdFileError(ValueError):
@@ -726,7 +957,7 @@ class FbdFile(BinaryFile):
         pdiv:
             Divisor to reduce number of entries in phase histogram.
         pixel_dwell_time:
-            Number of microseconds the scanner remains at each pixel.
+            Number of microseconds scanner remains at each pixel.
         laser_frequency:
             Laser frequency in Hz.
             The default is 20000000 Hz (or 40000000 Hz for second harmonics),
@@ -757,6 +988,8 @@ class FbdFile(BinaryFile):
     _ext: ClassVar[set[str]] = {'.fbd'}
     _data_offset: int  # position of raw data in file
     _effective_header_t: list[tuple[str, str]] | None
+    _pixel_dwell_time_from_table: bool
+    _laser_factor_provided: bool
 
     header: numpy.recarray[Any, Any] | None
     """File header, if any."""
@@ -789,7 +1022,7 @@ class FbdFile(BinaryFile):
     """Divisor to reduce number of entries in phase histogram."""
 
     pixel_dwell_time: float
-    """Number of microseconds the scanner remains at each pixel."""
+    """Number of microseconds scanner remains at each pixel."""
 
     laser_frequency: float
     """Laser frequency in Hz."""
@@ -1114,6 +1347,7 @@ class FbdFile(BinaryFile):
         self._data_offset = 0
         self._effective_header_t = None
         self._pixel_dwell_time_from_table = False
+        self._laser_factor_provided = laser_factor > 0
 
         with contextlib.ExitStack() as stack:
             stack.callback(self.close)
@@ -1460,11 +1694,8 @@ class FbdFile(BinaryFile):
     @override
     def attrs(self) -> dict[str, Any]:
         """Selected metadata as dict."""
-        return {
+        attrs = {
             **super().attrs,
-            # 'header': self.header,
-            # 'fbf': self.fbf,
-            # 'fbs': self.fbs,
             # 'decoder_settings': self.decoder_settings,
             'channels': self.channels,
             'code': self.code,
@@ -1486,6 +1717,13 @@ class FbdFile(BinaryFile):
             'units_per_sample': self.units_per_sample,
             'windows': self.windows,
         }
+        if self.header is not None:
+            attrs['flimbox_header'] = self.header
+        if self.fbf is not None:
+            attrs['flimbox_firmware'] = self.fbf
+        if self.fbs is not None:
+            attrs['flimbox_settings'] = self.fbs
+        return attrs
 
     @cached_property
     def decoder_settings(self) -> dict[str, NDArray[numpy.int16] | int | bool]:
@@ -2018,7 +2256,8 @@ class FbdFile(BinaryFile):
 
         Parameters:
             data:
-                FLIMbox data stream. By default, the data is read from file.
+                FLIMbox data stream.
+                By default, the data is read from file.
             word_count:
                 Number of data words to process.
                 By default, all words are processed.
@@ -2035,11 +2274,11 @@ class FbdFile(BinaryFile):
                 An ``int8`` or ``int16`` array of shape ``(channels, size)``.
                 A value of ``-1`` means no photon was counted.
             times:
-                The times in FLIMbox counter units at each data point.
+                Times in FLIMbox counter units at each data point.
                 An array of type uint64, potentially huge.
             markers:
-                The indices of up markers in the data stream, usually
-                indicating frame starts. An array of type ssize_t.
+                Indices of up markers in data stream, usually indicating
+                frame starts. An array of type ssize_t.
 
         """
         del kwargs  # unused
@@ -2095,12 +2334,14 @@ class FbdFile(BinaryFile):
         """Refine pixel_dwell_time and laser_factor from frame durations.
 
         First evaluate the current ``pixel_dwell_time`` against the frame
-        data. Then, only when ``pixel_dwell_time`` was originally derived
-        from the header's ``pixel_dwell_time_index`` (i.e. not from
-        computed timing metadata, XML/FBS settings, or user input), search
+        data.
+        Then, only when ``pixel_dwell_time`` was originally derived from
+        the header's ``pixel_dwell_time_index`` (i.e. not from computed
+        timing metadata, XML/FBS settings, or user input), search
         ``_header_pixel_dwell_time`` for a value that produces *more* valid
-        frames and replace ``pixel_dwell_time`` if found. Always refine
-        ``laser_factor`` from the median of detected frame durations.
+        frames and replace ``pixel_dwell_time`` if found.
+        Refine ``laser_factor`` from the median of detected frame durations,
+        unless it was explicitly provided by the user.
         Update attributes in-place and issue warnings.
 
         Parameters:
@@ -2209,7 +2450,7 @@ class FbdFile(BinaryFile):
             )
 
         # refine laser_factor from median of valid frame durations
-        if best_durations:
+        if best_durations and not self._laser_factor_provided:
             ups = self.pixel_dwell_time * 1e-6 * pmax_factor * lf
             lt = self.scanner_line_length * ups
             median_dur = float(numpy.median(best_durations))
@@ -2259,8 +2500,8 @@ class FbdFile(BinaryFile):
                 Minimum and maximum aspect ratios of valid frames.
                 The default lets 1:1 aspect pass.
             frame_cluster:
-                Index of the frame duration cluster to use when
-                calculating the correction factor.
+                Index of frame duration cluster to use when
+                calculating correction factor.
             refine:
                 Refine settings: True=always, None=if needed, False=never.
             **kwargs:
@@ -2505,6 +2746,46 @@ class FbdFile(BinaryFile):
             ]
         return result
 
+    def asxarray(self, **kwargs: Any) -> DataArray:
+        """Return image histogram as xarray.
+
+        Parameters:
+            **kwargs: Optional arguments to :py:meth:`asimage`.
+
+        Returns:
+            :
+                Image histogram and select metadata as xarray DataArray.
+
+        """
+        from xarray import DataArray
+
+        data = self.asimage(**kwargs)
+
+        coords: dict[str, Any] = {}
+        try:
+            region = self.fbs['ScanParams']['ImageRegion']  # type: ignore[index]
+            coords['Y'] = numpy.linspace(
+                region['YStart'], region['YEnd'], data.shape[2]
+            )
+            coords['X'] = numpy.linspace(
+                region['XStart'], region['XEnd'], data.shape[3]
+            )
+        except (KeyError, TypeError):
+            pass
+
+        # TODO: return arrival window indices or micro-times as H coords?
+        coords['H'] = numpy.linspace(
+            0.0, numpy.pi * 2, data.shape[-1], endpoint=False
+        )
+
+        return DataArray(
+            data,
+            coords=coords,
+            dims=('T', 'C', 'Y', 'X', 'H'),
+            name=self.name,
+            attrs=self.attrs,
+        )
+
     @override
     def __str__(self) -> str:
         info = [repr(self)]
@@ -2651,7 +2932,7 @@ def fbf_read(
         file:
             Name of FBF file to open, or seekable binary stream.
         firmware:
-            Include the firmware binary data.
+            Include firmware binary data.
         maxheaderlength:
             Maximum length of ASCII header.
 
@@ -2877,7 +3158,7 @@ def fbd_to_b64(
         laser_factor:
             Factor to correct dwell_time/laser_frequency.
         pixel_dwell_time:
-            Number of microseconds the scanner remains at each pixel.
+            Number of microseconds scanner remains at each pixel.
         frame_size:
             Number of pixels in one line scan, excluding retrace.
         scanner_line_length:
@@ -2891,7 +3172,7 @@ def fbd_to_b64(
         verbose:
             Print detailed information about file and conversion.
         show:
-            If True, plot (but do not write) the decoded frames.
+            If True, plot (but do not write) decoded frames.
             If False, one B64 files is written for each frame and channel.
 
     """
@@ -3234,7 +3515,7 @@ def askopenfilename(**kwargs: Any) -> str:
 
 
 def main() -> int:
-    """Run the command-line interface and return the exit code."""
+    """Run command-line interface and return exit code."""
     import click
 
     @click.group()
