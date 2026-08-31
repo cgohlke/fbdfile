@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.8.8
+:Version: 2026.8.30
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -36,14 +36,21 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (optional)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.7.31 (optional)
-- `Click <https://pypi.python.org/pypi/click>`_ 8.4.2
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.23 (optional)
+- `Click <https://pypi.python.org/pypi/click>`_ 8.5.0
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.9 (build)
 
 Revisions
 ---------
+
+2026.8.30
+
+- Do not refine user-provided laser_factor (breaking; see PhasorPy issue 372).
+- Add FbdFile.asxarray method (requires xarray).
+- Add imread convenience function.
 
 2026.8.8
 
