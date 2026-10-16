@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.8.30
+:Version: 2026.10.16
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -50,7 +50,8 @@ Install the fbdfile package and all dependencies from the
 
     python -m pip install -U fbdfile[all]
 
-See `Examples`_ for using the programming interface.
+See `Examples`_ and `Documentation <https://www.cgohlke.com/docs/fbdfile/>`_
+for using the programming interface.
 
 Source code and support are available on
 `GitHub <https://github.com/cgohlke/fbdfile>`_.
@@ -61,17 +62,27 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (optional)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.23 (optional)
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (optional)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.10.15 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.5.0
   (optional, for command line apps)
 - `Cython <https://pypi.org/project/cython/>`_ 3.2.9 (build)
 
 Revisions
 ---------
+
+2026.10.16
+
+- Fix frames fallback overwriting user-provided laser_factor.
+- Fix frames fallback computing relative instead of absolute laser_factor.
+- Fix FBS settings overriding user-provided scanner_frame_start.
+- Fix reading FBD files with embedded header from streams without name.
+- Fix decode returning invalid markers for empty data.
+- Fix potential out-of-bounds access and division by zero in Cython code.
+- Saturate histogram counts at 65535 and warn instead of wrapping.
 
 2026.8.30
 
@@ -107,37 +118,9 @@ Revisions
 
 2026.2.6
 
-- Fix code review issues.
+- …
 
-2026.1.14
-
-- Improve code quality.
-
-2025.12.12
-
-- Add attrs property to FbdFile.
-- Improve code quality.
-
-2025.11.8
-
-- Allow to override FbdFile decoder, firmware, and settings.
-- Always try to load settings from .fbs.xml file.
-- Factor out BinaryFile base class.
-- Derive FbdFileError from ValueError.
-- Build ABI3 wheels.
-
-2025.9.18
-
-- Fix reading FBF and FBS files from streams.
-
-2025.9.17
-
-- Make frame_markers a numpy array.
-- Add options to specify number of OpenMP threads.
-
-2025.9.16
-
-- Initial alpha release based on lfdfiles 2025.7.31.
+Refer to the CHANGES file for older revisions.
 
 Notes
 -----
@@ -207,7 +190,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.8.30'
+__version__ = '2026.10.16'
 
 __all__ = [
     'FbdFile',
@@ -1451,11 +1434,11 @@ class FbdFile(BinaryFile):
             self.scanner_line_length = int(scn['ScanLineLength'])
         if self.scanner_line_start < 0:
             self.scanner_line_start = int(scn['ScanLineLeftBorder'])
-        if 'PixelOffsetToFrameFlag' in scn:
+        if self.scanner_frame_start < 0:
             # TODO: check this
-            self.scanner_frame_start = scn['PixelOffsetToFrameFlag']
-        else:
-            self.scanner_frame_start = 0
+            self.scanner_frame_start = int(
+                scn.get('PixelOffsetToFrameFlag', 0)
+            )
         if self.pixel_dwell_time < 0:
             self.pixel_dwell_time = scn['PixelDwellTime']['value']
             if (
@@ -1546,7 +1529,14 @@ class FbdFile(BinaryFile):
         """Initialize instance from 32 KB file header."""
         # the first 1024 bytes contain the start of a FLIMbox firmware file
         if self.fbf is None:
-            self.fbf = fbf_read(self._fh.name)
+            buf = bytes(self._read_at(0, 1024)).split(b'\x00', 1)[0]
+            try:
+                self.fbf = fbf_parse_header(bytes2str(buf))
+            except UnicodeDecodeError:
+                self.fbf = {}
+            if not self.fbf:
+                msg = 'failed to parse FBF header'
+                raise ValueError(msg)
 
         self.is_32bit = '32fifo' in self.fbf['decoder']
 
@@ -2604,22 +2594,37 @@ class FbdFile(BinaryFile):
             cluster_indices = [remap[c] for c in cluster_indices]
             # possible correction factors, assuming square frame shape
             line_num = self.frame_size
-            laser_factors = [c[0] / (line_time * line_num) for c in clusters]
+            # line_time includes current laser_factor
+            laser_factors = [
+                c[0] * self.laser_factor / (line_time * line_num)
+                for c in clusters
+            ]
             # select specified frame cluster
             frame_cluster = min(frame_cluster, len(laser_factors) - 1)
-            self.laser_factor = laser_factors[frame_cluster]
             frame_markers = [
                 (int(markers[i]), int(markers[i + 1]) - 1)
                 for i, c in enumerate(cluster_indices)
                 if c == frame_cluster
             ]
-            msgs = [
-                (
-                    'no frames detected with default settings. '
-                    'Using square shape and correction factor '
-                    f'{self.laser_factor:.5f}.'
-                ),
-            ]
+            if self._laser_factor_provided:
+                line_num = max(
+                    1, round(clusters[frame_cluster][0] / line_time)
+                )
+                msgs = [
+                    (
+                        'no frames detected with provided laser_factor '
+                        f'{self.laser_factor}. Using {line_num} lines.'
+                    ),
+                ]
+            else:
+                self.laser_factor = laser_factors[frame_cluster]
+                msgs = [
+                    (
+                        'no frames detected with default settings. '
+                        'Using square shape and correction factor '
+                        f'{self.laser_factor:.5f}.'
+                    ),
+                ]
             if len(laser_factors) > 1:
                 factors = ', '.join(f'{i:.5f}' for i in laser_factors[:4])
                 msgs.append(
@@ -2678,12 +2683,13 @@ class FbdFile(BinaryFile):
                 (True=always, None=if needed, False=never).
 
         Returns:
-            Image histogram of shape (number of frames, channels in bins
-            array, lines per frame, scanner samples per line,
-            histogram bins). If ``square_frame`` is True, both lines per frame
-            and scanner samples per line equal ``frame_size``; otherwise they
-            equal the detected line count and ``scanner_line_length``
-            respectively.
+            Image histogram of shape (number of frames, channels in bins array,
+            lines per frame, scanner samples per line, histogram bins).
+            If ``square_frame`` is True, lines per frame and scanner samples
+            per line are at most ``frame_size``, fewer if the detected line
+            count or ``scanner_line_length - scanner_line_start`` is smaller;
+            otherwise they equal the detected line count plus one guard line
+            and ``scanner_line_length`` respectively.
 
         """
         kwargs_frames = parse_kwargs(
@@ -2718,7 +2724,7 @@ class FbdFile(BinaryFile):
         )
         result = numpy.zeros(shape, dtype=numpy.uint16)
         # calculate frame data histogram
-        fbd_histogram(
+        if fbd_histogram(
             bins,
             times,
             frame_markers,
@@ -2726,7 +2732,12 @@ class FbdFile(BinaryFile):
             self.scanner_frame_start,
             result,
             num_threads,
-        )
+        ):
+            warnings.warn(
+                'histogram counts saturated at 65535; '
+                'consider decreasing integrate_frames',
+                stacklevel=2,
+            )
         # reshape frames and slice valid region
         result = result.reshape(shape[:2] + scanner_shape + shape[-1:])
         if square_frame:
@@ -3173,7 +3184,9 @@ def fbd_to_b64(
             Print detailed information about file and conversion.
         show:
             If True, plot (but do not write) decoded frames.
-            If False, one B64 files is written for each frame and channel.
+            If False, one B64 file is written for each frame and channel.
+            Requires square frames, i.e., ``square_frame=True`` and a
+            fully contained crop region.
 
     """
     prints: Any = print if verbose else nullfunc
