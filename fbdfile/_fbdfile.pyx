@@ -96,7 +96,8 @@ def fbd_decode(
             times in FLIMbox counter units at each data point are returned.
         markers_out (numpy.ndarray):
             A `ssize_t` array of appropriate length, where indices into
-            `times_out` are returned for all data words with markers enabled.
+            `times_out` are returned for data words where the marker
+            transitions from low to high (rising edge).
         windows (int):
             Number of sampling windows.
         pdiv (int):
@@ -140,22 +141,26 @@ def fbd_decode(
         ssize_t i, j, c
         data_t d
         times_t tcc_max, t0, t1
-        int m0, m1, pcc, win
-        int pmax = ((pcc_mask >> pcc_shr) + 1) // harmonics
-        int pmax_win = harmonics * pmax // windows
+        int m0, m1, pcc, win, pmax, pmax_win
         bint do_swap = (data_t is uint32_t) and swap_words
 
     if bins_out.shape[0] != decoder_table.shape[0]:
         raise ValueError('shape mismatch between bins and decoder_table')
     if bins_out.shape[1] != times_out.size:
         raise ValueError('shape mismatch between bins and time')
-    if pmax <= 1 or pmax_win < 1 or pdiv < 1:
+    if data.size < datasize:
+        raise ValueError('data size smaller than bins')
+    if harmonics < 1 or windows < 1 or pdiv < 1:
+        raise ValueError('invalid parameters')
+    pmax = ((pcc_mask >> pcc_shr) + 1) // harmonics
+    pmax_win = harmonics * pmax // windows
+    if pmax <= 1 or pmax_win < 1:
         raise ValueError('invalid parameters')
     if data_t is uint16_t:
         if swap_words:
             raise ValueError(f'cannot swap words of {data.itemsize=}')
     if datasize == 0:
-        return
+        return 0
 
     # calculate cross correlation phase index
     with nogil, parallel(num_threads=num_threads):
@@ -240,11 +245,16 @@ def fbd_histogram(
             Initialized `uint16` array of shape
             `(number of frames, channels, frame_size, histogram bins)`,
             where computed histogram will be stored.
+            Counts saturate at 65535.
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
 
+    Returns:
+        True if any histogram count saturated.
+
     """
     cdef:
+        uint8_t[::1] saturated
         ssize_t nframes = hist_out.shape[0]
         ssize_t nchannels = hist_out.shape[1]
         ssize_t framelen = hist_out.shape[2]
@@ -263,7 +273,17 @@ def fbd_histogram(
     if units_per_sample <= 0:
         raise ValueError('units_per_sample must be positive')
     if nmarkers == 0:
-        return
+        return False
+    if nframes == 0:
+        raise ValueError('hist_out has no frames')
+    for f in range(nmarkers):
+        j = frame_markers[f, 0]
+        k = frame_markers[f, 1]
+        if j < 0 or j > k or k > times.shape[0] or j >= times.shape[0]:
+            raise ValueError(f'invalid frame_markers[{f}] {(j, k)}')
+
+    # per-channel flags avoid data races in prange
+    saturated = bytearray(nchannels)
 
     with nogil, parallel(num_threads=num_threads):
         for f in range(nmarkers):
@@ -280,7 +300,15 @@ def fbd_histogram(
                     if pixel >= 0 and pixel < framelen:
                         bin = <ssize_t> bins[channel, i]
                         if bin >= 0 and bin < nbins:
-                            hist_out[frame, channel, pixel, bin] += 1
+                            if hist_out[frame, channel, pixel, bin] < 65535:
+                                hist_out[frame, channel, pixel, bin] += 1
+                            else:
+                                saturated[channel] = 1
+
+    for channel in range(nchannels):
+        if saturated[channel]:
+            return True
+    return False
 
 
 cdef:
@@ -550,10 +578,10 @@ def sflim_decode_photons(
         ssize_t ret, height, width, address, np
         ssize_t maxphotons = photons.shape[0]
 
-    if size == 0:
-        return 0
     if photons.shape[1] != 5:
         raise ValueError(f'invalid photons shape {photons.shape} != (-1, 5)')
+    if size == 0 or maxphotons == 0:
+        return 0
     if pixeltime == 0:
         raise ValueError('pixeltime must be positive')
     if len(frameshape) != 2 or frameshape[0] < 1 or frameshape[1] < 1:
