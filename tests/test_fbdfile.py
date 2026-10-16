@@ -29,7 +29,7 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2026.8.30
+:Version: 2026.10.16
 
 """
 
@@ -195,13 +195,12 @@ class TestBinaryFile:
 
     def test_file_extension_fails(self):
         """Test BinaryFile with wrong file extension fails."""
-        ext = BinaryFile._ext
-        BinaryFile._ext = {'.lif'}
-        try:
-            with pytest.raises(ValueError):
-                BinaryFile(self.filename)
-        finally:
-            BinaryFile._ext = ext
+
+        class TestFile(BinaryFile):
+            _ext = {'.test'}  # noqa: RUF012
+
+        with pytest.raises(ValueError):
+            TestFile(self.filename)
 
     def test_file_not_seekable(self):
         """Test BinaryFile with non-seekable file fails."""
@@ -1361,6 +1360,63 @@ def test_fbd_bytesio():
             imshow(image.sum(-1, dtype=numpy.uint32), show=True)
 
 
+def test_fbd_bytesio_header():
+    """Test read FBD with embedded header from BytesIO."""
+    filename = (
+        DATA / 'calibration_coumarin6_EtOH_25xNA1p4oil_780nm_'
+        '2lzrpwr06282021POSTEXP$EC0Z.fbd'
+    )
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with open(filename, 'rb') as fh:
+        data = io.BytesIO(fh.read())
+
+    with FbdFile(data, code='EC0Z') as fbd, FbdFile(filename) as ref:
+        assert fbd.fbf == ref.fbf
+        assert fbd.decoder == ref.decoder == '_b2w4c2'
+        assert fbd.laser_factor == ref.laser_factor
+
+
+def test_fbd_fbs_override():
+    """Test user-supplied settings are not overridden by FBS file."""
+    filename = DATA / 'FBS/TESTFILE$XX2X.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename, scanner_frame_start=3) as fbd:
+        assert fbd.fbs is not None
+        assert fbd.scanner_frame_start == 3
+
+
+def test_fbd_frames_fallback_laser_factor():
+    """Test frame-detection fallback respects and scales laser_factor."""
+    filename = (
+        DATA / 'PhasorPy' / '60xw850fov48p30_cell3_nucb_mitogr_actinor'
+        '_40f000$ei0t.fbd'
+    )
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    # user-supplied laser_factor is not overwritten by fallback
+    with FbdFile(filename, pixel_dwell_time=100.0, laser_factor=1.5) as fbd:
+        records = fbd.decode()
+        with pytest.warns(UserWarning, match='provided laser_factor'):
+            shape, fm = fbd.frames(records, refine=False)
+        assert fbd.laser_factor == 1.5
+        assert shape[1] == 404
+        assert len(fm) == 40
+
+    # fallback factor is absolute, not relative to current laser_factor
+    with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
+        records = fbd.decode()
+        fbd.laser_factor = 2.0
+        with pytest.warns(UserWarning, match='no frames detected'):
+            fbd.frames(records, refine=False)
+        # 32 us true dwell time over 256 square lines. 257 actual lines
+        assert abs(fbd.laser_factor * 100.0 / 32.0 - 257 / 256) < 0.01
+
+
 def test_fbd_cc0z_b2w4c2():
     """Test CC0Z b2w4c2 FBD file with auto laser_factor refinement."""
     # Fix #1: units_per_sample captured after frames() may update laser_factor.
@@ -1543,6 +1599,92 @@ def test_sflim_decode():
     assert photons[12345].tolist() == [205, 3, 2, 181, 51]
 
 
+def test_decode_validation():
+    """Test input validation of Cython decode and histogram functions."""
+    table = numpy.zeros((1, 4), dtype=numpy.int16)
+    settings = {
+        'decoder_table': table,
+        'tcc_mask': 0xFF,
+        'tcc_shr': 0,
+        'pcc_mask': 0x3F,
+        'pcc_shr': 0,
+        'marker_mask': 0x100,
+        'marker_shr': 8,
+        'win_mask': 0x600,
+        'win_shr': 9,
+    }
+    data = numpy.arange(8, dtype=numpy.uint16)
+    bins = numpy.empty((1, 8), dtype=numpy.int8)
+    times = numpy.empty(8, dtype=numpy.uint64)
+    markers = numpy.zeros(4, dtype=numpy.intp)
+
+    assert fbd_decode(data, bins, times, markers, 4, 1, 1, **settings) == 0
+
+    # empty input returns zero markers
+    count = fbd_decode(
+        data[:0], bins[:, :0], times[:0], markers, 4, 1, 1, **settings
+    )
+    assert count == 0
+
+    # data smaller than output
+    with pytest.raises(ValueError, match='data size'):
+        fbd_decode(data[:4], bins, times, markers, 4, 1, 1, **settings)
+
+    # zero divisors
+    with pytest.raises(ValueError, match='invalid parameters'):
+        fbd_decode(data, bins, times, markers, 0, 1, 1, **settings)
+    with pytest.raises(ValueError, match='invalid parameters'):
+        fbd_decode(data, bins, times, markers, 4, 1, 0, **settings)
+
+    # out-of-range frame markers
+    hist = numpy.zeros((1, 1, 4, 64), dtype=numpy.uint16)
+    for fm in ([[0, 9]], [[-1, 4]], [[5, 4]], [[8, 8]]):
+        with pytest.raises(ValueError, match='invalid frame_markers'):
+            fbd_histogram(
+                bins, times, numpy.array(fm, dtype=numpy.intp), 1.0, 0, hist
+            )
+    with pytest.raises(ValueError, match='no frames'):
+        fbd_histogram(
+            bins,
+            times,
+            numpy.array([[0, 8]], dtype=numpy.intp),
+            1.0,
+            0,
+            hist[:0],
+        )
+
+    # histogram counts saturate instead of wrapping
+    bins[:] = 0
+    times[:] = 0
+    hist[:] = 65534
+    assert fbd_histogram(
+        bins, times, numpy.array([[0, 8]], dtype=numpy.intp), 1.0, 0, hist
+    )
+    assert hist[0, 0, 0, 0] == 65535
+    hist[:] = 0
+    assert not fbd_histogram(
+        bins, times, numpy.array([[0, 8]], dtype=numpy.intp), 1.0, 0, hist
+    )
+
+    # zero-row photon buffer
+    photons = numpy.zeros((0, 5), dtype=numpy.uint16)
+    data32 = numpy.full(8, 0x1001, dtype=numpy.uint32)
+    assert sflim_decode_photons(data32, photons, (4, 4), pixeltime=1) == 0
+
+
+def test_fbd_decode_empty():
+    """Test FbdFile.decode with zero words returns empty arrays."""
+    filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with FbdFile(filename) as fbd:
+        bins, times, markers = fbd.decode(word_count=0)
+        assert bins.shape == (2, 0)
+        assert times.shape == (0,)
+        assert markers.shape == (0,)
+
+
 def test_fbd_to_b64():
     """Test fbd_to_b64 function."""
     lfdfiles = pytest.importorskip('lfdfiles')
@@ -1681,6 +1823,10 @@ def test_glob_fbs(filename):
     fbs_read(DATA / filename)
 
 
+@pytest.mark.thread_unsafe(
+    reason='Matplotlib and GUI backends are not thread-safe'
+)
+@pytest.mark.iterations(1)
 @pytest.mark.parametrize(
     'filename', glob.glob('**/*.fbd', root_dir=DATA, recursive=True)
 )
@@ -1699,8 +1845,10 @@ def test_glob_fbd(filename):
         str(fbd)
         fbd.decode()
         fbd.asimage(None, None)
-        fbd.plot(show=False)  # TODO: plots are not closed
-    pyplot.close()
+        try:
+            fbd.plot(show=False)
+        finally:
+            pyplot.close('all')
 
 
 @pytest.mark.skipif(
