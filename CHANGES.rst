@@ -4,6 +4,21 @@
 Revisions
 =========
 
+2026.11.5
+
+- Fix histogram including samples before scanner_frame_start in first pixel.
+- Fix frames excluding last data word of each frame (breaking).
+- Fix histogram dropping last bin if pdiv does not divide pmax.
+- Fix parsing FBF headers with unnamed or fractional MHz values.
+- Fix BinaryFile._read_into on partial reads.
+- Fix sflim_decode return value and saturate counts.
+- Fix FbdFile.decode silently ignoring unknown arguments (breaking).
+- Fix decoder_settings not updating when decoder changes.
+- Fall back to defaults for invalid laser frequency and factor in header.
+- Validate indices in FBD header.
+- Add FBDFILE_NUM_THREADS environment variable.
+- Parallelize fbd_decode over data words instead of channels.
+
 2026.10.16
 
 - Fix frames fallback overwriting user-provided laser_factor.
