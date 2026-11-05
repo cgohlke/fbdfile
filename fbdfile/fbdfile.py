@@ -39,7 +39,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.16
+:Version: 2026.11.5
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -62,17 +62,32 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (optional)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.10.15 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.5.0
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.9 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.3.1 (build)
 
 Revisions
 ---------
+
+2026.11.5
+
+- Fix histogram including samples before scanner_frame_start in first pixel.
+- Fix frames excluding last data word of each frame (breaking).
+- Fix histogram dropping last bin if pdiv does not divide pmax.
+- Fix parsing FBF headers with unnamed or fractional MHz values.
+- Fix BinaryFile._read_into on partial reads.
+- Fix sflim_decode return value and saturate counts.
+- Fix FbdFile.decode silently ignoring unknown arguments (breaking).
+- Fix decoder_settings not updating when decoder changes.
+- Fall back to defaults for invalid laser frequency and factor in header.
+- Validate indices in FBD header.
+- Add FBDFILE_NUM_THREADS environment variable.
+- Parallelize fbd_decode over data words instead of channels.
 
 2026.10.16
 
@@ -190,7 +205,7 @@ View the histogram and metadata in a FLIMbox data file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.10.16'
+__version__ = '2026.11.5'
 
 __all__ = [
     'FbdFile',
@@ -215,7 +230,7 @@ import struct
 import sys
 import threading
 import warnings
-from functools import cached_property
+from functools import cache, cached_property
 from typing import TYPE_CHECKING, ClassVar, final, overload, override
 
 if TYPE_CHECKING:
@@ -229,6 +244,9 @@ if TYPE_CHECKING:
 import numpy
 
 from ._fbdfile import fbd_decode, fbd_histogram, sflim_decode
+
+type DecoderSettings = dict[str, NDArray[numpy.int16] | int | bool]
+"""Parameters to decode FLIMbox data stream."""
 
 
 @overload
@@ -399,6 +417,7 @@ def imread(
             else return full scanner frame.
         num_threads:
             Number of OpenMP threads to use for parallelization.
+            If less than 1, use :py:func:`default_num_threads`.
         select_frames:
             Specifies which image frames to return.
             By default, all frames are returned.
@@ -460,23 +479,33 @@ class FbdFileError(ValueError):
 class BinaryFile:
     """Binary file.
 
+    :Version: 2026.11.1
+
     Parameters:
         file:
-            File name or seekable binary stream.
+            File name, seekable binary stream, fsspec OpenFile, or mmap.
         mode:
             File open mode if ``file`` is a file name.
             If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+            Ignored for streams and other file objects.
         memmap:
             Map file into memory.
             Ignored if memory mapping is not available or if the stream does
             not support it.
+            ``mmap.mmap`` objects are always accessed directly.
 
     Notes:
         Memory mapping can improve random-access read performance on large
         files or repeated reads of the same file regions by reducing syscall
         overhead and data copying.
         For sequential one-pass reads, regular buffered I/O may be faster.
+
+        File access is not thread-safe unless the file is memory-mapped
+        or ``set_lock(True)`` was called.
+
+        This class is shared (inlined) among many modules, for example,
+        czifile, liffile, sdtfile, orifile, obffile, ptufile, and fbdfile.
 
     Raises:
         TypeError:
@@ -516,7 +545,7 @@ class BinaryFile:
         self._memmap = bool(memmap)
         self._lock = contextlib.nullcontext()
 
-        if isinstance(file, (str, os.PathLike)):
+        if isinstance(file, str | os.PathLike):
             ext = os.path.splitext(file)[-1].lower()
             if self._ext and ext not in self._ext:
                 msg = f'invalid file extension: {ext!r} not in {self._ext!r}'
@@ -543,57 +572,84 @@ class BinaryFile:
                 raise TypeError(msg)
 
             self._fh = file
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            if not self._is_seekable(self._fh):
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
-            elif hasattr(file, 'name'):
-                self._path = os.path.abspath(file.name)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         elif hasattr(file, 'open'):
             # fsspec OpenFile
             self._fh = file.open()
             self._close = True
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            fh: object = self._fh
+            if isinstance(fh, io.TextIOBase):
+                with contextlib.suppress(Exception):
+                    fh.close()
+                msg = f'{file=!r} is not open in binary mode'
+                raise TypeError(msg)
+            if not self._is_seekable(self._fh):
                 with contextlib.suppress(Exception):
                     self._fh.close()
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         else:
             msg = f'cannot handle {type(file)=}'
             raise TypeError(msg)
 
-        if hasattr(file, 'name') and file.name:
-            self._name = os.path.basename(file.name)
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            self._name = os.path.basename(name)
         elif self._path:
             self._name = os.path.basename(self._path)
         else:
             self._name = type(file).__name__
 
-        if memmap:
-            _fh: Any = self._fh
-            if isinstance(_fh, mmap.mmap):
-                self._mm = _fh
+        _fh: Any = self._fh
+        if isinstance(_fh, mmap.mmap):
+            # mmap objects lack readinto and writable
+            self._mm = _fh
+            self._mv = memoryview(self._mm)
+        elif memmap:
+            try:
+                access = (
+                    mmap.ACCESS_WRITE
+                    if self._fh.writable()
+                    else mmap.ACCESS_READ
+                )
+                self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
                 self._mv = memoryview(self._mm)
-            else:
-                try:
-                    access = (
-                        mmap.ACCESS_WRITE
-                        if self._fh.writable()
-                        else mmap.ACCESS_READ
-                    )
-                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
-                    self._mv = memoryview(self._mm)
-                except OSError:
-                    pass
+            except (OSError, ValueError, AttributeError):
+                # empty file or stream without file descriptor
+                pass
+
+    @staticmethod
+    def _is_seekable(fh: Any, /) -> bool:
+        """Return whether file handle supports random access."""
+        try:
+            fh.tell()
+            # e.g. fsspec HTTPStreamFile for servers without range requests
+            seekable = getattr(fh, 'seekable', None)
+            return seekable is None or bool(seekable())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _file_path(file: Any, /) -> str:
+        """Return path of file object, absolute if on local file system."""
+        path = getattr(file, 'path', None)
+        if isinstance(path, str) and path:
+            protocol = getattr(getattr(file, 'fs', None), 'protocol', 'file')
+            if isinstance(protocol, str):
+                protocol = (protocol,)
+            if 'file' in protocol or 'local' in protocol:
+                return os.path.abspath(path)
+            return path
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            return os.path.abspath(name)
+        return ''
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -641,6 +697,7 @@ class BinaryFile:
             enabled:
                 If true, use a threading.RLock, else a no-op lock.
                 Has no effect when memory-mapped I/O is active.
+                Do not call while other threads access the file.
 
         """
         if self._mm is not None:
@@ -657,13 +714,23 @@ class BinaryFile:
             data: Data to write.
 
         """
-        if self._mm is not None and self.writable:
-            # writable mmap: direct slice write, no cursor movement
-            self._mm[offset : offset + len(data)] = data
+        mv = self._mv
+        if mv is not None and not mv.readonly:
+            # slicing would silently write at negative or clipped offsets
+            end = offset + len(data)
+            if offset < 0 or end > len(mv):
+                msg = (
+                    f'cannot write {len(data)} bytes at {offset=} past end '
+                    f'of memory-mapped file of size {len(mv)}'
+                )
+                raise ValueError(msg)
+            mv[offset:end] = data
         else:
+            # regular streams reject negative offsets
             with self._lock:
                 self._fh.seek(offset)
                 self._fh.write(data)
+            self.__dict__.pop('filesize', None)
 
     def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
         """Read bytes from file at given offset.
@@ -674,12 +741,21 @@ class BinaryFile:
 
         Parameters:
             offset: Byte offset from start of file.
-            size: Number of bytes to read.
+            size: Number of bytes to read. If ``-1``, read to end of file.
 
         """
+        # hot path for small reads; regular streams reject bad arguments
         mv = self._mv
         if mv is not None:
+            if offset < 0 or size < 0:
+                # slicing would silently misread; size=-1 reads to end
+                if offset < 0 or size < -1:
+                    msg = f'{offset=} < 0 or {size=} < -1'
+                    raise ValueError(msg)
+                return mv[offset:]
             return mv[offset : offset + size]
+        # do not allocate more than available for corrupted sizes
+        # size = min(size, max(0, self.filesize - offset))
         fh = self._fh
         with self._lock:
             fh.seek(offset)
@@ -696,9 +772,16 @@ class BinaryFile:
             Number of bytes read.
 
         """
+        # hot path for bulk reads shared by many modules: keep it minimal.
+        # Buffered streams fill the buffer in one readinto call until EOF;
+        # do not add short-read loops or typed-buffer handling here.
         nbytes = len(buffer)
         mv = self._mv
         if mv is not None:
+            if offset < 0:
+                # slicing would silently index from the end of the map
+                msg = f'{offset=} < 0'
+                raise ValueError(msg)
             n = min(nbytes, max(0, len(mv) - offset))
             buffer[:n] = numpy.frombuffer(mv[offset : offset + n], numpy.uint8)
             return n
@@ -708,9 +791,10 @@ class BinaryFile:
             fh.seek(offset)
             try:
                 return fh.readinto(buffer)  # type: ignore[attr-defined, no-any-return]
-            except (AttributeError, OSError):
+            except (AttributeError, io.UnsupportedOperation):
+                # stream without readinto; do not swallow real I/O errors
                 data = fh.read(nbytes)
-                buffer[:] = numpy.frombuffer(data, numpy.uint8)
+                buffer[: len(data)] = numpy.frombuffer(data, numpy.uint8)
                 return len(data)
 
     def _read_array(
@@ -742,6 +826,7 @@ class BinaryFile:
             writable:
                 By default, return read-only array from memory-mapped file.
                 Prevents accidental modification of underlying writable file.
+                Arrays from read-only memory maps are always read-only.
                 Has no effect for non-memory-mapped files (always writable).
             truncate:
                 Allow partial reads of array.
@@ -750,36 +835,43 @@ class BinaryFile:
         """
         dtype = numpy.dtype(dtype)
         itemsize = dtype.itemsize
-        if offset < 0:
-            msg = f'{offset=} < 0'
-            raise ValueError(msg)
-        if count < -1:
-            msg = f'{count=} < -1'
-            raise ValueError(msg)
 
         mv = self._mv
         if mv is not None:
+            if offset < 0 or count < -1:
+                # slicing would silently misread; regular streams raise
+                msg = f'{offset=} < 0 or {count=} < -1'
+                raise ValueError(msg)
             if count == -1:
                 count = max(0, (len(mv) - offset) // itemsize)
             nbytes = count * itemsize
             size = min(nbytes, max(0, len(mv) - offset))
             n = size - size % itemsize
-            array = numpy.frombuffer(
-                mv[offset : offset + n],
-                dtype,
-            )
             if copy:
-                array = array.copy()
-            elif not writable and array.flags.writeable:
-                array.flags.writeable = False
+                # ndarray.copy is slow for structured dtypes
+                array = numpy.frombuffer(
+                    bytearray(mv[offset : offset + n]), dtype
+                )
+            else:
+                array = numpy.frombuffer(mv[offset : offset + n], dtype)
+                if not writable and array.flags.writeable:
+                    array.flags.writeable = False
         elif count > -1:
+            # read directly; routing through _read_into adds per-call overhead
             fh = self._fh
             nbytes = count * itemsize
+            # do not allocate more than available for corrupted sizes
+            # available = max(0, (self.filesize - offset) // itemsize)
+            # array = numpy.empty(min(count, available), dtype)
             array = numpy.empty(count, dtype)
             with self._lock:
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                # array.data builds slow PEP 3118 format for structured dtypes
+                n = fh.readinto(array)  # type: ignore[attr-defined]
         else:
+            if count < -1:
+                msg = f'{count=} < -1'
+                raise ValueError(msg)
             fh = self._fh
             with self._lock:
                 fh.seek(0, os.SEEK_END)
@@ -788,7 +880,7 @@ class BinaryFile:
                 nbytes = count * itemsize
                 array = numpy.empty(count, dtype)
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                n = fh.readinto(array)  # type: ignore[attr-defined]
 
         if n != nbytes:
             array = array[: n // itemsize]
@@ -806,10 +898,12 @@ class BinaryFile:
         if self._mm is not None:
             return len(self._mm)
         fh = self._fh
-        try:
-            return os.fstat(fh.fileno()).st_size
-        except (AttributeError, io.UnsupportedOperation, OSError):
-            pass
+        if not fh.writable():
+            # fstat does not see unflushed writes
+            try:
+                return os.fstat(fh.fileno()).st_size
+            except (AttributeError, io.UnsupportedOperation, OSError):
+                pass
         with self._lock:
             pos = fh.tell()
             fh.seek(0, os.SEEK_END)
@@ -820,6 +914,8 @@ class BinaryFile:
     @property
     def writable(self) -> bool:
         """File is open for writing."""
+        if self._mv is not None:
+            return not self._mv.readonly
         return self._fh.writable()
 
     @property
@@ -973,6 +1069,7 @@ class FbdFile(BinaryFile):
     _effective_header_t: list[tuple[str, str]] | None
     _pixel_dwell_time_from_table: bool
     _laser_factor_provided: bool
+    _decoder_cache: tuple[str, DecoderSettings] | None
 
     header: numpy.recarray[Any, Any] | None
     """File header, if any."""
@@ -1331,6 +1428,7 @@ class FbdFile(BinaryFile):
         self._effective_header_t = None
         self._pixel_dwell_time_from_table = False
         self._laser_factor_provided = laser_factor > 0
+        self._decoder_cache = None
 
         with contextlib.ExitStack() as stack:
             stack.callback(self.close)
@@ -1351,7 +1449,9 @@ class FbdFile(BinaryFile):
                 else:
                     self.code = match.group(1)
 
-            assert len(self.code) == 4, code
+            if len(self.code) != 4:
+                msg = f'invalid code {self.code!r}'
+                raise ValueError(msg)
 
             if self._from_fbs():  # and self.code[2].isnumeric()
                 pass
@@ -1360,9 +1460,10 @@ class FbdFile(BinaryFile):
             else:
                 self._from_code()
 
-            assert self.windows >= 0
-            assert self.channels >= 0
-            assert self.harmonics >= 0
+            for attr in ('windows', 'channels', 'harmonics'):
+                if getattr(self, attr) < 1:
+                    msg = f'{attr!r} not initialized'
+                    raise ValueError(msg)
 
             if self.decoder is None:
                 bytes_ = 4 if self.is_32bit else 2
@@ -1377,13 +1478,11 @@ class FbdFile(BinaryFile):
                     self.decoder += f't{t}'
 
             if self.pdiv <= 0:
-                with contextlib.suppress(AttributeError):
-                    self.pdiv = max(1, self.pmax // 64)
-            assert self.pdiv >= 0
+                self.pdiv = max(1, self.pmax // 64)
 
             for attr in self._attributes:
                 value = getattr(self, attr)
-                if isinstance(value, (int, float)):
+                if isinstance(value, int | float):
                     if value < 0:
                         msg = f'{attr!r} not initialized'
                         raise ValueError(msg)
@@ -1397,6 +1496,8 @@ class FbdFile(BinaryFile):
     def _from_fbs(self) -> bool:
         """Initialize instance from VistaVision settings file."""
         if self.fbs is None:
+            if not self._path:
+                return False
             for ext in ('.FBS.XML', '.fbs.xml'):
                 filename = self._path.rsplit('$', 1)[0] + ext
                 if os.path.exists(filename):
@@ -1460,7 +1561,7 @@ class FbdFile(BinaryFile):
 
     def _from_code(self) -> None:
         """Initialize instance from file name code."""
-        code = self.code
+        code = self.code.upper()
         if self.frame_size < 0:
             try:
                 self.frame_size = self._frame_size[code[0]]
@@ -1567,37 +1668,39 @@ class FbdFile(BinaryFile):
         if self.harmonics < 0:
             self.harmonics = (1, 2)[self.fbf['secondharmonic']]
         if self.windows < 0:
-            windows = self._header_windows[hdr['windows_index']]
+            windows = table_get(self._header_windows, hdr['windows_index'], -1)
             self.windows = self.fbf.get('windows', windows)
-            if self.windows != windows:
+            if windows >= 0 and self.windows != windows:
                 logger().warning(
                     'FbdFile: windows mismatch between FBF and FBD header '
                     f'({self.windows!r} != {windows!r})'
                 )
         if self.channels < 0:
-            channels = self._header_channels[hdr['channels_index']]
+            channels = table_get(
+                self._header_channels, hdr['channels_index'], -1
+            )
             self.channels = self.fbf.get('channels', channels)
-            if self.channels != channels:
+            if channels >= 0 and self.channels != channels:
                 logger().warning(
                     'FbdFile: channels mismatch between FBF and FBD header '
                     f'({self.channels!r} != {channels!r})'
                 )
         if self.synthesizer == '':
-            try:
-                self.synthesizer = self._header_synthesizers[
-                    hdr['synthesizer_index']
-                ]
-            except IndexError:
-                self.synthesizer = 'Unknown'
+            self.synthesizer = table_get(
+                self._header_synthesizers, hdr['synthesizer_index'], 'Unknown'
+            )
         if self.scanner == '':
-            try:
-                self.scanner = self._header_scanners[hdr['scanner_index']]
-            except IndexError:
-                self.scanner = 'Unknown'
+            self.scanner = table_get(
+                self._header_scanners, hdr['scanner_index'], 'Unknown'
+            )
         if self.laser_frequency < 0:
             self.laser_frequency = float(hdr['laser_frequency'])
+            if not self.laser_frequency > 0:
+                self.laser_frequency = 20000000.0 * self.harmonics
         if self.laser_factor < 0:
             self.laser_factor = float(hdr['laser_factor'])
+            if not self.laser_factor > 0:
+                self.laser_factor = 1.0
         if self.scanner_line_length < 0:
             self.scanner_line_length = int(hdr['line_length'])
         if self.scanner_line_start < 0:
@@ -1631,27 +1734,28 @@ class FbdFile(BinaryFile):
                         / (self.frame_size * self.scanner_line_length)
                     )
         else:
+            code = self.code.upper()
             if self.frame_size < 0:
-                try:
-                    self.frame_size = round(
-                        self._header_frame_size[hdr['frame_size_index']]
-                    )
-                except IndexError:
+                self.frame_size = table_get(
+                    self._header_frame_size, hdr['frame_size_index'], -1
+                )
+                if self.frame_size < 0 and code[0] in self._frame_size:
                     # fall back to filename
-                    if self.code and self.code[0] in self._frame_size:
-                        self.frame_size = self._frame_size[self.code[0]]
+                    self.frame_size = self._frame_size[code[0]]
             if self.pixel_dwell_time < 0:
                 try:
                     # use file name
-                    dwt = self._scanner_settings[self.code[3]][self.code[1]][0]
+                    dwt = self._scanner_settings[code[3]][code[1]][0]
                 except (IndexError, KeyError, TypeError):
-                    try:
-                        dwt = self._header_pixel_dwell_time[
-                            hdr['pixel_dwell_time_index']
-                        ]
-                        self._pixel_dwell_time_from_table = True
-                    except IndexError:
+                    dwt = table_get(
+                        self._header_pixel_dwell_time,
+                        hdr['pixel_dwell_time_index'],
+                        None,
+                    )
+                    if dwt is None:
                         dwt = 1.0
+                    else:
+                        self._pixel_dwell_time_from_table = True
                 self.pixel_dwell_time = dwt
 
         self._data_offset = 65536  # start of encoded data; contains 2 headers
@@ -1715,8 +1819,8 @@ class FbdFile(BinaryFile):
             attrs['flimbox_settings'] = self.fbs
         return attrs
 
-    @cached_property
-    def decoder_settings(self) -> dict[str, NDArray[numpy.int16] | int | bool]:
+    @property
+    def decoder_settings(self) -> DecoderSettings:
         """Return parameters to decode FLIMbox data stream.
 
         Returns:
@@ -1738,15 +1842,20 @@ class FbdFile(BinaryFile):
         if self.decoder is None:
             msg = 'decoder is not set'
             raise ValueError(msg)
+        if self._decoder_cache is not None:
+            name, settings = self._decoder_cache
+            if name == self.decoder:
+                return settings
         try:
-            settings = getattr(self, self.decoder)()
+            result: DecoderSettings = getattr(self, self.decoder)()
         except (AttributeError, NotImplementedError) as exc:
             msg = f'decoder {self.decoder!r} not implemented'
             raise ValueError(msg) from exc
-        return settings  # type: ignore[no-any-return]
+        self._decoder_cache = (self.decoder, result)
+        return result
 
     @staticmethod
-    def _b4w16c4t10() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w16c4t10() -> DecoderSettings:
         # return parameters to decode 32-bit, 16 windows, 4 channels (Spartan6)
         # with line markers
         # 0b00000000000000000000000011111111 cross correlation phase
@@ -1762,15 +1871,12 @@ class FbdFile(BinaryFile):
         # 0b00001000000000000000000000000000 ch3 photon
         # 0b11110000000000000000000000000000 ch3 window
         table = numpy.full((4, 2**20), -1, numpy.int16)
-        for i in range(2**20):
-            if i & 0b1:
-                table[0, i] = (i & 0b11110) >> 1
-            if i & 0b100000:
-                table[1, i] = (i & 0b1111000000) >> 6
-            if i & 0b10000000000:
-                table[2, i] = (i & 0b111100000000000) >> 11
-            if i & 0b1000000000000000:
-                table[3, i] = (i & 0b11110000000000000000) >> 16
+        indices = numpy.arange(2**20, dtype=numpy.int32)
+        for ic in range(4):
+            # bit (5*ic) of index = photon, bits [(5*ic+4):(5*ic+1)] = window
+            photon = ((indices >> (ic * 5)) & 0x1).astype(bool)
+            window = (indices >> (1 + ic * 5)) & 0xF
+            table[ic] = numpy.where(photon, window, -1).astype(numpy.int16)
         return {
             'decoder_table': table,
             'tcc_mask': 0x3FF,
@@ -1787,7 +1893,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w16c4t11() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w16c4t11() -> DecoderSettings:
         # return parameters to decode 32-bit, 16 windows, 4 channels (Spartan6)
         # without line markers
         # 0b00000000000000000000000011111111 cross correlation phase
@@ -1809,7 +1915,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w8c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w8c4() -> DecoderSettings:
         # return parameters to decode 32-bit, 8 windows, 4 channels (Spartan-6)
         # 0b00000000000000000000000000000001 ch0 photon
         # 0b00000000000000000000000000001110 ch0 window
@@ -1846,7 +1952,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w4c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w4c2() -> DecoderSettings:
         # return parameters to decode 4 windows, 2 channels
         # fmt: off
         table = numpy.array(
@@ -1870,7 +1976,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w8c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w8c2() -> DecoderSettings:
         # return parameters to decode 8 windows, 2 channels
         # TODO: this does not correctly decode data acquired with ISS firmware
         table = numpy.full((2, 81), -1, numpy.int16)
@@ -1890,7 +1996,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w8c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w8c4() -> DecoderSettings:
         # return parameters to decode 8 windows, 4 channels
         # 0b00000000000000000000000011111111 cross correlation time (8 bits)
         # 0b00000000000000000000000000111111 cross correlation phase (6 bits)
@@ -1934,7 +2040,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w16c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w16c1() -> DecoderSettings:
         # return parameters to decode 16 windows, 1 channel
         logger().warning(
             'FbdFile: b2w16c1 decoder not tested. '
@@ -1959,7 +2065,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w16c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w16c2() -> DecoderSettings:
         # return parameters to decode 16 windows, 2 channels
         logger().warning(
             'FbdFile: b2w16c2 decoder not tested. '
@@ -1989,7 +2095,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w32c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w32c1() -> DecoderSettings:
         # return parameters to decode 32 windows, 1 channel
         # 0b00000000000000000000000111111111 cross correlation time (9 bits)
         # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
@@ -2015,7 +2121,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w32c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w32c2() -> DecoderSettings:
         # return parameters to decode 32 windows, 2 channels
         # TODO
         msg = (
@@ -2025,26 +2131,25 @@ class FbdFile(BinaryFile):
         raise NotImplementedError(msg)
 
     @staticmethod
-    def _b4w32c2() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w32c2() -> DecoderSettings:
         # return parameters to decode 32-bit, 32 windows, 2 channels
         # Firmware: 32w32fifo256bin
-        # Each 32-bit word encodes two independent 16-bit 32w1ch words:
-        # 0b00000000000000000000000111111111 ch0 CC time (9 bits)
-        # 0b00000000000000000000000011111111 ch0 CC phase (8 bits)
+        # 0b00000000000000000000000111111111 cross correlation time (9 bits)
+        # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
         # 0b00000000000000000000001000000000 frame sync marker (bit 9)
         # 0b00000000000000000000010000000000 ch0 photon (bit 10)
-        # 0b00000000000000001111100000000000 ch0 window (bits [15:11], 5 bits)
-        # 0b00000001111111110000000000000000 ch1 CC time (bits [24:16])
-        # 0b00000001000000000000000000000000 ch1 photon (bit 26)
-        # 0b11111100000000000000000000000000 ch1 window (bits [31:27], 5 bits)
-        # win_mask covers bits [31:10] = 22 bits;
-        # ch0 at [15:10], ch1 at [31:26]
+        # 0b00000000000000001111100000000000 ch0 window (bits [15:11])
+        # 0b00000100000000000000000000000000 ch1 photon (bit 26)
+        # 0b11111000000000000000000000000000 ch1 window (bits [31:27])
+        # both channels use the phase and time of the lower 16 bits,
+        # as in the VistaVision decoder
+        # win_mask covers bits [31:10] = 22 bits
         logger().warning(
             'FbdFile: b4w32c2 decoder not tested. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
         table = numpy.full((2, 2**22), -1, numpy.int16)
-        indices = numpy.arange(2**22, dtype=numpy.uint32)
+        indices = numpy.arange(2**22, dtype=numpy.int32)
         # ch0: bit 0 of index = ch0 photon (orig bit 10),
         # bits [5:1] = ch0 window
         ch0_photon = (indices & 0x1).astype(bool)
@@ -2068,24 +2173,25 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w64c3() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w64c3() -> DecoderSettings:
         # return parameters to decode 32-bit, 64 windows, 3 channels
         # Firmware: 64w32fifo256bin
         # 0b00000000000000000000001111111111 cross correlation time (10 bits)
         # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
         # 0b00000000000000000000010000000000 frame sync marker (bit 10)
         # 0b00000000000000000000100000000000 ch0 photon (bit 11)
-        # 0b00000000000000000111000000000000 ch0 window (bits [14:12]... wait)
-        # bits [17:12] = ch0 window (6 bits), bit 11 = ch0 photon
-        # bit 18 = ch1 photon, bits [24:19] = ch1 window
-        # bit 25 = ch2 photon, bits [31:26] = ch2 window
+        # 0b00000000000000111111000000000000 ch0 window (bits [17:12])
+        # 0b00000000000001000000000000000000 ch1 photon (bit 18)
+        # 0b00000001111110000000000000000000 ch1 window (bits [24:19])
+        # 0b00000010000000000000000000000000 ch2 photon (bit 25)
+        # 0b11111100000000000000000000000000 ch2 window (bits [31:26])
         # win_mask covers bits [31:11] = 21 bits
         logger().warning(
             'FbdFile: b4w64c3 decoder not tested. '
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
         table = numpy.full((3, 2**21), -1, numpy.int16)
-        indices = numpy.arange(2**21, dtype=numpy.uint32)
+        indices = numpy.arange(2**21, dtype=numpy.int32)
         # ch0: bit 0 of index = ch0 photon (orig bit 11),
         # bits [6:1] = ch0 window
         ch0_photon = (indices & 0x1).astype(bool)
@@ -2114,14 +2220,14 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w32c3() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w32c3() -> DecoderSettings:
         # return parameters to decode 32-bit, 32 windows, 3 channels
         # Firmware: 32w32fifo256bin3ch
         # 0b00000000000000000000011111111111 cross correlation time (11 bits)
         # 0b00000000000000000000000011111111 cross correlation phase (8 bits)
         # 0b00000000000000000010000000000000 frame sync marker (bit 13)
         # 0b00000000000000000100000000000000 ch0 photon (bit 14)
-        # 0b00000000000001111000000000000000 ch0 window (bits [19:15], 5 bits)
+        # 0b00000000000011111000000000000000 ch0 window (bits [19:15], 5 bits)
         # 0b00000000000100000000000000000000 ch1 photon (bit 20)
         # 0b00000011111000000000000000000000 ch1 window (bits [25:21], 5 bits)
         # 0b00000100000000000000000000000000 ch2 photon (bit 26)
@@ -2132,7 +2238,7 @@ class FbdFile(BinaryFile):
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
         table = numpy.full((3, 2**18), -1, numpy.int16)
-        indices = numpy.arange(2**18, dtype=numpy.uint32)
+        indices = numpy.arange(2**18, dtype=numpy.int32)
         # ch0: bit 0 of index = ch0 photon (orig bit 14),
         # bits [5:1] = ch0 window
         ch0_photon = (indices & 0x1).astype(bool)
@@ -2161,18 +2267,20 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b4w32c4() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b4w32c4() -> DecoderSettings:
         # return parameters to decode 32-bit, 32 windows, 4 channels
         # Firmware: 32w32fifo64bin4ch (variable ccTimeBitCount/ccPhaseBitCount)
         # 0b00000000000000000000000001111111 tcc (variable, <=7 bits)
         # 0b00000000000000000000000000111111 pcc (variable, <=6 bits)
         # 0b00000000000000000000000010000000 frame sync marker (bit 7)
         # 0b00000000000000000000000100000000 ch0 photon (bit 8)
-        # 0b00000000000000000000011110000000 ch0 window (bits [13:9], 5 bits)
-        # Actually: bits [13:9] = ch0 window, bit 8 = ch0 photon
-        # bit 14 = ch1 photon, bits [19:15] = ch1 window
-        # bit 20 = ch2 photon, bits [25:21] = ch2 window
-        # bit 26 = ch3 photon, bits [31:27] = ch3 window
+        # 0b00000000000000000011111000000000 ch0 window (bits [13:9])
+        # 0b00000000000000000100000000000000 ch1 photon (bit 14)
+        # 0b00000000000011111000000000000000 ch1 window (bits [19:15])
+        # 0b00000000000100000000000000000000 ch2 photon (bit 20)
+        # 0b00000011111000000000000000000000 ch2 window (bits [25:21])
+        # 0b00000100000000000000000000000000 ch3 photon (bit 26)
+        # 0b11111000000000000000000000000000 ch3 window (bits [31:27])
         # win_mask covers bits [31:8] = 24 bits -> 2^24 = 16M entries
         # Note: uses ~128 MB of RAM for the decoder table
         logger().warning(
@@ -2180,7 +2288,7 @@ class FbdFile(BinaryFile):
             'Please submit an FBD file to https://github.com/cgohlke/fbdfile'
         )
         table = numpy.full((4, 2**24), -1, numpy.int16)
-        indices = numpy.arange(2**24, dtype=numpy.uint32)
+        indices = numpy.arange(2**24, dtype=numpy.int32)
         for ic in range(4):
             # bit (6*ic) of index = photon, bits [(6*ic+5):(6*ic+1)] = window
             photon = ((indices >> (ic * 6)) & 0x1).astype(bool)
@@ -2199,7 +2307,7 @@ class FbdFile(BinaryFile):
         }
 
     @staticmethod
-    def _b2w64c1() -> dict[str, NDArray[numpy.int16] | int | bool]:
+    def _b2w64c1() -> DecoderSettings:
         # return parameters to decode 64 windows, 1 channel
         # 0b00000000000000000000000011111111 cross correlation time (8 bits)
         # 0b00000000000000000000000000111111 cross correlation phase (6 bits)
@@ -2236,7 +2344,6 @@ class FbdFile(BinaryFile):
         skip_words: int = 0,
         max_markers: int = 65536,
         num_threads: int = 0,
-        **kwargs: Any,
     ) -> tuple[
         NDArray[numpy.int8 | numpy.int16],
         NDArray[numpy.uint32 | numpy.uint64],
@@ -2257,6 +2364,7 @@ class FbdFile(BinaryFile):
                 Maximum number of markers expected in data stream.
             num_threads:
                 Number of OpenMP threads to use for parallelization.
+                If less than 1, use :py:func:`default_num_threads`.
 
         Returns:
             bins:
@@ -2271,7 +2379,6 @@ class FbdFile(BinaryFile):
                 frame starts. An array of type ssize_t.
 
         """
-        del kwargs  # unused
         dtype = numpy.dtype('<u4' if self.is_32bit else '<u2')
         if data is None:
             offset = self._data_offset + skip_words * dtype.itemsize
@@ -2287,7 +2394,11 @@ class FbdFile(BinaryFile):
 
         bins_out = numpy.empty(
             (self.channels, data.size),
-            dtype=numpy.int8 if self.pmax // self.pdiv <= 128 else numpy.int16,
+            dtype=(
+                numpy.int8
+                if (self.pmax - 1) // self.pdiv < 128
+                else numpy.int16
+            ),
         )
         times_out = numpy.empty(data.size, dtype=numpy.uint64)
         markers_out = numpy.zeros(max_markers, dtype=numpy.intp)
@@ -2300,7 +2411,7 @@ class FbdFile(BinaryFile):
             self.windows,
             self.pdiv,
             self.harmonics,
-            num_threads=num_threads,
+            num_threads=get_num_threads(num_threads),
             **self.decoder_settings,
         )
 
@@ -2499,7 +2610,8 @@ class FbdFile(BinaryFile):
 
         Returns:
             1. shape: Dimensions of scanner frame.
-            2. frame_markers: Start and stop indices of detected image frames.
+            2. frame_markers: Start and stop (exclusive) indices of
+               detected image frames.
 
         """
         if records is None:
@@ -2528,7 +2640,7 @@ class FbdFile(BinaryFile):
                 aspect = self.frame_size / lines
                 if aspect_range[0] < aspect < aspect_range[1]:
                     frame_markers.append(
-                        (int(markers[i]), int(markers[i + 1]) - 1)
+                        (int(markers[i]), int(markers[i + 1]))
                     )
                     valid_durations.append(float(duration))
                 else:
@@ -2602,7 +2714,7 @@ class FbdFile(BinaryFile):
             # select specified frame cluster
             frame_cluster = min(frame_cluster, len(laser_factors) - 1)
             frame_markers = [
-                (int(markers[i]), int(markers[i + 1]) - 1)
+                (int(markers[i]), int(markers[i + 1]))
                 for i, c in enumerate(cluster_indices)
                 if c == frame_cluster
             ]
@@ -2676,6 +2788,7 @@ class FbdFile(BinaryFile):
                 else return full scanner frame.
             num_threads:
                 Number of OpenMP threads to use for parallelization.
+                If less than 1, use :py:func:`default_num_threads`.
             **kwargs:
                 Additional arguments passed to
                 :py:meth:`FbdFile.decode` and
@@ -2720,7 +2833,7 @@ class FbdFile(BinaryFile):
             integrate_frames or len(frame_markers),
             bins.shape[0],  # channels
             scanner_shape[0] * scanner_shape[1],
-            self.pmax // self.pdiv,
+            (self.pmax - 1) // self.pdiv + 1,
         )
         result = numpy.zeros(shape, dtype=numpy.uint16)
         # calculate frame data histogram
@@ -2731,7 +2844,7 @@ class FbdFile(BinaryFile):
             units_per_sample,
             self.scanner_frame_start,
             result,
-            num_threads,
+            get_num_threads(num_threads),
         ):
             warnings.warn(
                 'histogram counts saturated at 65535; '
@@ -2849,7 +2962,7 @@ class FbdFile(BinaryFile):
         ax.set_title(self.name)
         ax.set_xlabel('Bin')
         ax.set_ylabel('Counts')
-        ax.set_xlim((0, self.pmax // self.pdiv - 1))
+        ax.set_xlim((0, (self.pmax - 1) // self.pdiv))
         bins, times, markers = self.decode()
         bins_channel: Any  # for mypy
         for ch, bins_channel in enumerate(bins):
@@ -2895,7 +3008,7 @@ def fbs_read(file: str | os.PathLike[str] | IO[str], /) -> dict[str, Any]:
 
     """
     fh: IO[str]
-    if isinstance(file, (str, os.PathLike)):
+    if isinstance(file, str | os.PathLike):
         fh = open(file, encoding='utf-8')  # noqa: SIM115
         close = True
     elif hasattr(file, 'seek'):
@@ -2960,7 +3073,7 @@ def fbf_read(
 
     """
     fh: IO[bytes]
-    if isinstance(file, (str, os.PathLike)):
+    if isinstance(file, str | os.PathLike):
         fh = open(file, 'rb')  # noqa: SIM115
         close = True
     elif hasattr(file, 'seek'):
@@ -2984,8 +3097,8 @@ def fbf_read(
             msg = 'failed to parse FBF header'
             raise ValueError(msg)
         if firmware:
-            if len(header) != maxheaderlength:
-                fh.seek(len(header) + 1)
+            if len(buffer) != maxheaderlength:
+                fh.seek(len(buffer) + 1)
             meta['firmware'] = fh.read()
     finally:
         if close:
@@ -3006,19 +3119,27 @@ def fbf_parse_header(header: str, /) -> dict[str, Any]:
         name, value, unit = matches
         name = name.strip().lower()
         if not name:
-            name = {'w': 'windows', 'ch': 'channels'}.get(unit)
+            name = {'w': 'windows', 'ch': 'channels'}.get(unit, '')
+            if not name:
+                comment.append(value + unit)
+                continue
             unit = ''
-        if not name:
-            comment.append(name + value + unit)
-            continue
-        if unit == 'MHz':
-            unit = 1000000
-        try:
-            value = (int(value) * int(unit)) if unit else int(value)
-            unit = 0
-        except ValueError:
-            pass
-        settings[name] = (value + unit) if value != '' else True
+        if value == '':
+            settings[name] = True
+        elif unit == 'MHz':
+            try:
+                number = float(value) * 1000000
+            except ValueError:
+                settings[name] = value + unit
+            else:
+                settings[name] = int(number) if number.is_integer() else number
+        elif unit:
+            settings[name] = value + unit
+        else:
+            try:
+                settings[name] = int(value)
+            except ValueError:
+                settings[name] = value
     cstr = '/'.join(reversed(comment))
     if cstr:
         settings['comment'] = cstr
@@ -3352,6 +3473,40 @@ def format_dict(
     return '\n'.join(result)
 
 
+def table_get(table: Sequence[Any], index: Any, default: Any, /) -> Any:
+    """Return table[index] if index is in range, else default."""
+    index = int(index)
+    return table[index] if 0 <= index < len(table) else default
+
+
+def get_num_threads(num_threads: int, /) -> int:
+    """Return num_threads, or default_num_threads() if less than 1."""
+    if num_threads > 0:
+        return num_threads
+    return default_num_threads()
+
+
+@cache
+def default_num_threads() -> int:
+    """Return default maximum number of worker threads.
+
+    Uses the ``FBDFILE_NUM_THREADS`` environment variable if set,
+    else half the available CPU cores (up to 32), with a minimum of 1.
+    The value is determined once per process.
+
+    """
+    value = os.environ.get('FBDFILE_NUM_THREADS')
+    if value is not None:
+        try:
+            return max(1, int(value))
+        except ValueError:
+            logger().warning(f'invalid FBDFILE_NUM_THREADS={value!r}')
+    cpu_count = getattr(os, 'process_cpu_count', os.cpu_count)()
+    if cpu_count is None:
+        return 1
+    return min(32, max(1, cpu_count // 2))
+
+
 def nullfunc(*args: Any, **kwargs: Any) -> None:
     """Do nothing."""
     del args, kwargs
@@ -3569,7 +3724,7 @@ def main() -> int:
                 filetypes=[('FBD files', '*.FBD')],
             )
         if files:
-            if isinstance(files, (list, tuple)):
+            if isinstance(files, list | tuple):
                 files = files[0]
             with FbdFile(files, memmap=True) as fbd:
                 print(fbd)  # noqa: T201
