@@ -128,6 +128,7 @@ def fbd_decode(
             Swap words of uint32 data.
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
+            Must be positive.
 
     Returns:
         Number of markers written to `markers_out`.
@@ -139,9 +140,9 @@ def fbd_decode(
         ssize_t nchannel = bins_out.shape[0]
         ssize_t datasize = bins_out.shape[1]
         ssize_t i, j, c
-        data_t d
+        data_t d, m0, m1
         times_t tcc_max, t0, t1
-        int m0, m1, pcc, win, pmax, pmax_win
+        int pcc, win, widx, pmax, pmax_win
         bint do_swap = (data_t is uint32_t) and swap_words
 
     if bins_out.shape[0] != decoder_table.shape[0]:
@@ -152,6 +153,8 @@ def fbd_decode(
         raise ValueError('data size smaller than bins')
     if harmonics < 1 or windows < 1 or pdiv < 1:
         raise ValueError('invalid parameters')
+    if num_threads < 1:
+        raise ValueError(f'{num_threads=} < 1')
     pmax = ((pcc_mask >> pcc_shr) + 1) // harmonics
     pmax_win = harmonics * pmax // windows
     if pmax <= 1 or pmax_win < 1:
@@ -164,15 +167,15 @@ def fbd_decode(
 
     # calculate cross correlation phase index
     with nogil, parallel(num_threads=num_threads):
-        for c in prange(nchannel):
-            for i in range(datasize):
-                d = data[i]
-                if do_swap:
-                    d = (d >> 16) | (d << 16)
-                pcc = <int>((d & pcc_mask) >> pcc_shr)
-                win = <int>((d & win_mask) >> win_shr)
-                if win < maxwindex:
-                    win = <int>(decoder_table[c, win])
+        for i in prange(datasize):
+            d = data[i]
+            if do_swap:
+                d = (d >> 16) | (d << 16)
+            pcc = <int>((d & pcc_mask) >> pcc_shr)
+            widx = <int>((d & win_mask) >> win_shr)
+            for c in range(nchannel):
+                if widx < maxwindex:
+                    win = <int>(decoder_table[c, widx])
                     if win >= 0:
                         bins_out[c, i] = <bins_t>(
                             (pmax-1 - (pcc + win * pmax_win) % pmax) // pdiv
@@ -188,7 +191,7 @@ def fbd_decode(
     d = data[0]
     if do_swap:
         d = (d >> 16) | (d << 16)
-    m0 = <int>(d & marker_mask)
+    m0 = d & marker_mask
     t0 = (d & tcc_mask) >> tcc_shr
     times_out[0] = 0
     for i in range(1, datasize):
@@ -197,7 +200,7 @@ def fbd_decode(
             d = (d >> 16) | (d << 16)
         # detect up-markers
         if j < maxmarker:
-            m1 = <int>(d & marker_mask)
+            m1 = d & marker_mask
             if m1 > m0:
                 markers_out[j] = i
                 j += 1
@@ -248,6 +251,7 @@ def fbd_histogram(
             Counts saturate at 65535.
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
+            Must be positive.
 
     Returns:
         True if any histogram count saturated.
@@ -262,6 +266,7 @@ def fbd_histogram(
         ssize_t nmarkers = frame_markers.shape[0]
         # ssize_t nwindows = hist_out.shape[3]
         ssize_t i, j, k, f, frame, channel, pixel, bin
+        double pos
         times_t t0
 
     if bins.shape[0] != hist_out.shape[1]:
@@ -272,6 +277,8 @@ def fbd_histogram(
         raise ValueError(f'{frame_markers.shape[1]=} != 2')
     if units_per_sample <= 0:
         raise ValueError('units_per_sample must be positive')
+    if num_threads < 1:
+        raise ValueError(f'{num_threads=} < 1')
     if nmarkers == 0:
         return False
     if nframes == 0:
@@ -293,11 +300,14 @@ def fbd_histogram(
             t0 = times[j]
             for channel in prange(nchannels):
                 for i in range(j, k):
-                    pixel = <ssize_t> (
+                    pos = (
                         <double>(times[i] - t0) / units_per_sample
                         - scanner_frame_start
                     )
-                    if pixel >= 0 and pixel < framelen:
+                    if pos < 0.0:
+                        continue
+                    pixel = <ssize_t> pos
+                    if pixel < framelen:
                         bin = <ssize_t> bins[channel, i]
                         if bin >= 0 and bin < nbins:
                             if hist_out[frame, channel, pixel, bin] < 65535:
@@ -354,6 +364,7 @@ def sflim_decode(
             Initialized `uint8` or `uint16` array of shape
             `(channels=32, phasebins=256, height, width)`
             to which photon counts are added.
+            Counts saturate at the maximum value of the data type.
         pixeltime (int):
             Pixel dwell time in FLIMbox units.
             ``math.ceil(dwelltime * 256 / 255 * frequency_factor * frequency)``
@@ -364,9 +375,10 @@ def sflim_decode(
             Maximum number of image frames to decode.
         num_threads (int):
             Number of OpenMP threads to use for parallelization.
+            Must be positive.
 
     Returns:
-        Number of image frames decoded.
+        Maximum number of image frames decoded for any address.
 
     Examples:
         >>> import numpy, math
@@ -384,6 +396,7 @@ def sflim_decode(
         >>> sflim_decode(
         ...     data, sflim, pixeltime=pixeltime, maxframes=20, num_threads=6
         ... )
+        20
         >>> numpy.unravel_index(numpy.argmax(sflim), sflim.shape)
         (np.int64(24), np.int64(178), np.int64(132), np.int64(248))
 
@@ -391,23 +404,26 @@ def sflim_decode(
     cdef:
         ssize_t size = data.size
         ssize_t address
-        ssize_t ret
+        ssize_t ret = 0
+        ssize_t[8] frames
 
     if size == 0:
-        return
+        return 0
     if pixeltime == 0:
         raise ValueError('pixeltime must be positive')
     if sflim.shape[0] != 32 or sflim.shape[1] != 256:
         raise ValueError(
             f'invalid sflim shape {sflim.shape} != (32, 256, height, width)'
         )
+    if num_threads < 1:
+        raise ValueError(f'{num_threads=} < 1')
 
     if enabletime == 0:
         enabletime = pixeltime * sflim.shape[3]
 
     with nogil, parallel(num_threads=num_threads):
         for address in prange(8):
-            ret = _decode_address(
+            frames[address] = _decode_address(
                 address,
                 data,
                 sflim,
@@ -416,11 +432,12 @@ def sflim_decode(
                 enabletime,
                 maxframes,
             )
-            if ret < 0:
-                with gil:
-                    raise ValueError(
-                        f'no start of frame found for {address=}'
-                    )
+
+    for address in range(8):
+        if frames[address] < 0:
+            raise ValueError(f'no start of frame found for {address=}')
+        if frames[address] > ret:
+            ret = frames[address]
     return ret
 
 
@@ -441,6 +458,12 @@ cdef ssize_t _decode_address(
         ssize_t i, c, h, y, x, start, frames, pixelindex
         uint64_t macrotime, macrotime0
         uint32_t d, pcc, tcc, tcc0, enable, ph
+        sflim_t maxcount
+
+    if sflim_t is uint8_t:
+        maxcount = 255
+    else:
+        maxcount = 65535
 
     # seek to first frame
     start = 0
@@ -495,25 +518,29 @@ cdef ssize_t _decode_address(
         if ph:
             c = address * 4
             h = (pcc + 32 * ((d & MASK_WN0) >> SHR_WN0)) % 256
-            sflim[c, h, y, x] += 1
+            if sflim[c, h, y, x] < maxcount:
+                sflim[c, h, y, x] += 1
 
         ph = (d & MASK_PH1) >> SHR_PH1
         if ph:
             c = address * 4 + 1
             h = (pcc + 32 * ((d & MASK_WN1) >> SHR_WN1)) % 256
-            sflim[c, h, y, x] += 1
+            if sflim[c, h, y, x] < maxcount:
+                sflim[c, h, y, x] += 1
 
         ph = (d & MASK_PH2) >> SHR_PH2
         if ph:
             c = address * 4 + 2
             h = (pcc + 32 * ((d & MASK_WN2) >> SHR_WN2)) % 256
-            sflim[c, h, y, x] += 1
+            if sflim[c, h, y, x] < maxcount:
+                sflim[c, h, y, x] += 1
 
         ph = (d & MASK_PH3) >> SHR_PH3
         if ph:
             c = address * 4 + 3
             h = (pcc + 32 * ((d & MASK_WN3) >> SHR_WN3)) % 256
-            sflim[c, h, y, x] += 1
+            if sflim[c, h, y, x] < maxcount:
+                sflim[c, h, y, x] += 1
 
     return frames
 
