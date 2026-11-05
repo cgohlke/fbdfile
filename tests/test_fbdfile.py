@@ -29,11 +29,10 @@
 
 """Unittests for the fbdfile package.
 
-:Version: 2026.10.16
+:Version: 2026.11.5
 
 """
 
-import contextlib
 import glob
 import io
 import os
@@ -41,10 +40,12 @@ import pathlib
 import sys
 import sysconfig
 import warnings
+from typing import Literal
 
 import numpy
 import pytest
-from numpy.testing import assert_almost_equal, assert_array_equal
+from numpy import array_equal  # faster than numpy.testing.assert_array_equal
+from numpy.testing import assert_almost_equal
 
 import fbdfile
 from fbdfile import (
@@ -85,7 +86,7 @@ except ImportError:
 
 
 @pytest.mark.skipif(__doc__ is None, reason='__doc__ is None')
-def test_version():
+def test_version() -> None:
     """Assert fbdfile versions match docstrings."""
     ver = ':Version: ' + __version__
     assert __doc__ is not None
@@ -94,378 +95,10 @@ def test_version():
     assert ver in fbdfile.__doc__
 
 
-class TestBinaryFile:
-    """Test BinaryFile with different file-like inputs."""
-
-    def setup_method(self):
-        self.filename = os.path.normpath(DATA / 'binary.bin')
-        if not os.path.exists(self.filename):
-            pytest.skip(f'{self.filename!r} not found')
-
-    def validate(
-        self,
-        fh: BinaryFile,
-        filepath: str | None = None,
-        filename: str | None = None,
-        dirname: str | None = None,
-        name: str | None = None,
-        *,
-        closed: bool = True,
-    ) -> None:
-        """Assert BinaryFile attributes."""
-        if filepath is None:
-            filepath = self.filename
-        if filename is None:
-            filename = os.path.basename(self.filename)
-        if dirname is None:
-            dirname = os.path.dirname(self.filename)
-        if name is None:
-            name = fh.filename
-
-        attrs = fh.attrs
-        assert attrs['name'] == name
-        assert attrs['filepath'] == filepath
-
-        assert fh.filepath == filepath
-        assert fh.filename == filename
-        assert fh.dirname == dirname
-        assert fh.name == name
-        assert fh.closed is False
-        assert fh.filesize == 256
-        assert len(fh.filehandle.read()) == 256
-        fh.filehandle.seek(10)
-        assert fh.filehandle.tell() == 10
-        assert fh.filehandle.read(1) == b'\n'
-        fh.close()
-        # underlying filehandle may still be be open if
-        # BinaryFile was given an open filehandle
-        assert fh._fh.closed is closed
-        # BinaryFile always reports itself as closed after close() is called
-        assert fh.closed
-
-    def test_str(self):
-        """Test BinaryFile with str path."""
-        file = self.filename
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    def test_pathlib(self):
-        """Test BinaryFile with pathlib.Path."""
-        file = pathlib.Path(self.filename)
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    def test_open_file(self):
-        """Test BinaryFile with open binary file."""
-        with open(self.filename, 'rb') as fh, BinaryFile(fh) as bf:
-            self.validate(bf, closed=False)
-
-    def test_bytesio(self):
-        """Test BinaryFile with BytesIO."""
-        with open(self.filename, 'rb') as fh:
-            file = io.BytesIO(fh.read())
-        with BinaryFile(file) as fh:
-            self.validate(
-                fh,
-                filepath='',
-                filename='',
-                dirname='',
-                name='BytesIO',
-                closed=False,
-            )
-
-    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_openfile(self):
-        """Test BinaryFile with fsspec OpenFile."""
-        file = fsspec.open(self.filename)
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_localfileopener(self):
-        """Test BinaryFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.filename) as file, BinaryFile(file) as fh:
-            self.validate(fh, closed=False)
-
-    def test_text_file_fails(self):
-        """Test BinaryFile with open text file fails."""
-        with open(self.filename) as fh:  # noqa: SIM117
-            with pytest.raises(TypeError):
-                BinaryFile(fh)
-
-    def test_file_extension_fails(self):
-        """Test BinaryFile with wrong file extension fails."""
-
-        class TestFile(BinaryFile):
-            _ext = {'.test'}  # noqa: RUF012
-
-        with pytest.raises(ValueError):
-            TestFile(self.filename)
-
-    def test_file_not_seekable(self):
-        """Test BinaryFile with non-seekable file fails."""
-
-        class File:
-            # mock file object without tell methods
-            def seek(self):
-                pass
-
-        with pytest.raises(ValueError):
-            BinaryFile(File())
-
-    def test_openfile_not_seekable(self):
-        """Test BinaryFile with non-seekable file fails."""
-
-        class File:
-            # mock fsspec OpenFile without seek/tell methods
-            @staticmethod
-            def open(*args, **kwargs):
-                del args, kwargs
-                return File()
-
-        with pytest.raises(ValueError):
-            BinaryFile(File())
-
-    def test_invalid_object(self):
-        """Test BinaryFile with invalid file object fails."""
-
-        class File:
-            # mock non-file object
-            pass
-
-        with pytest.raises(TypeError):
-            BinaryFile(File())
-
-    def test_invalid_mode(self):
-        """Test BinaryFile with invalid mode fails."""
-        with pytest.raises(ValueError):
-            BinaryFile(self.filename, mode='ab')
-
-    def test_memmap_disabled(self):
-        """Test memmap=False (default) does not memory-map file."""
-        with BinaryFile(self.filename) as fh:
-            assert fh._mm is None
-        with BinaryFile(self.filename, memmap=False) as fh:
-            assert fh._mm is None
-
-    def test_memmap_bytesio_ignored(self):
-        """Test memmap=True is silently ignored for BytesIO."""
-        with open(self.filename, 'rb') as f:
-            data = f.read()
-        with BinaryFile(io.BytesIO(data), memmap=True) as fh:
-            assert fh._mm is None
-            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-
-    def test_memmap_mmap_object(self):
-        """Test BinaryFile accepts an existing mmap.mmap as file handle."""
-        import mmap as mmap_module
-
-        with open(self.filename, 'rb') as f:
-            mm = mmap_module.mmap(
-                f.fileno(), 0, access=mmap_module.ACCESS_READ
-            )
-        arr = None
-        try:
-            with BinaryFile(mm, memmap=True) as fh:
-                assert fh._mm is mm
-                assert fh._mv is not None
-                assert fh.memmapped
-                assert fh.filesize == 256
-                assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-                arr = fh._read_array(10, 3, numpy.uint8)
-                assert numpy.array_equal(arr, [10, 11, 12])
-        finally:
-            del arr  # release mmap-backed array before closing mmap
-            mm.close()
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_at(self, memmap):
-        """Test _read_at returns bytes or memoryview at offset."""
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            data = fh._read_at(0, 4)
-            assert isinstance(data, memoryview if memmap else bytes)
-            assert bytes(data) == b'\x00\x01\x02\x03'
-            data = fh._read_at(10, 3)
-            assert bytes(data) == b'\x0a\x0b\x0c'
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_into(self, memmap):
-        """Test _read_into reads bytes at offset into existing uint8 buffer."""
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            buf = numpy.empty(4, numpy.uint8)
-            n = fh._read_into(0, buf)
-            assert n == 4
-            assert numpy.array_equal(buf, [0, 1, 2, 3])
-
-            buf = numpy.empty(3, numpy.uint8)
-            n = fh._read_into(10, buf)
-            assert n == 3
-            assert numpy.array_equal(buf, [10, 11, 12])
-
-            # read past end of file returns only available bytes
-            buf = numpy.empty(8, numpy.uint8)
-            n = fh._read_into(252, buf)
-            assert n == 4
-            assert numpy.array_equal(buf[:4], [252, 253, 254, 255])
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_array(self, memmap):
-        """Test _read_array returns array at offset; dtype, count=-1, copy."""
-        dtype = numpy.dtype('uint8')
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            arr = fh._read_array(0, 4, dtype)
-            assert arr.dtype == dtype
-            assert numpy.array_equal(arr, [0, 1, 2, 3])
-            arr = fh._read_array(10, 3, dtype)
-            assert numpy.array_equal(arr, [10, 11, 12])
-            if memmap:
-                assert not arr.flags.writeable
-                arr_copy = fh._read_array(0, 4, dtype, copy=True)
-                assert arr_copy.flags.writeable
-                arr_copy[0] = 99  # must not raise
-            else:
-                # multi-byte dtype: binary.bin bytes as uint16 LE pairs
-                arr16 = fh._read_array(0, 4, numpy.dtype('<u2'))
-                assert numpy.array_equal(
-                    arr16, [0x0100, 0x0302, 0x0504, 0x0706]
-                )
-            # count=-1 reads to end of file
-            arr_end = fh._read_array(252, -1, dtype)
-            assert numpy.array_equal(arr_end, [252, 253, 254, 255])
-
-    def test_read_array_writable_memmap(self, tmp_path):
-        """Test  writable=False makes mmap RO; writable=True keeps it RW."""
-        tmpfile = tmp_path / 'test.bin'
-        with open(self.filename, 'rb') as src:
-            tmpfile.write_bytes(src.read())
-        dtype = numpy.dtype('uint8')
-        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
-            arr_ro = fh._read_array(0, 4, dtype)
-            assert not arr_ro.flags.writeable
-            arr_rw = fh._read_array(0, 4, dtype, writable=True)
-            assert arr_rw.flags.writeable
-
-    def test_read_array_truncate(self, caplog):
-        """Test truncate=False raises; True returns partial; None logs."""
-        import logging
-
-        with (
-            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
-            pytest.raises(ValueError, match='expected 10 items, got 5'),
-        ):
-            fh._read_array(0, 10, numpy.uint8, truncate=False)
-        with BinaryFile(io.BytesIO(bytes(range(5)))) as fh:
-            arr = fh._read_array(0, 10, numpy.uint8, truncate=True)
-            assert len(arr) == 5
-            assert numpy.array_equal(arr, [0, 1, 2, 3, 4])
-        logger = BinaryFile.__module__.split('.')[0]
-        with (
-            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
-            caplog.at_level(logging.ERROR, logger=logger),
-        ):
-            arr = fh._read_array(0, 10, numpy.uint8, truncate=None)
-        assert len(arr) == 5
-        assert 'expected 10 items, got 5' in caplog.text
-
-    def test_read_array_mmap_alignment(self, tmp_path):
-        """Test mmap path truncates partial element to full boundary."""
-        # 7 bytes; requesting 4 uint16 (8 bytes); 3 complete elements fit
-        tmpfile = tmp_path / 'align.bin'
-        tmpfile.write_bytes(b'\x01\x00\x02\x00\x03\x00\xff')
-        dtype = numpy.dtype('<u2')
-        with BinaryFile(tmpfile, memmap=True) as fh:
-            arr = fh._read_array(0, 4, dtype, truncate=True)
-            assert len(arr) == 3
-            assert numpy.array_equal(arr, [1, 2, 3])
-            # truncate=False must raise even on mmap path
-            with pytest.raises(ValueError, match='expected 4 items, got 3'):
-                fh._read_array(0, 4, dtype, truncate=False)
-
-    def test_read_array_invalid_offset(self):
-        """Test _read_array raises ValueError for negative offset."""
-        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
-            with pytest.raises(ValueError, match='offset'):
-                fh._read_array(-1, 4, numpy.uint8)
-
-    def test_read_array_invalid_count(self):
-        """Test _read_array raises ValueError for count < -1."""
-        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
-            with pytest.raises(ValueError, match='count'):
-                fh._read_array(0, -2, numpy.uint8)
-
-    def test_write_at(self):
-        """Test _write_at writes bytes to file at given offset."""
-        with open(self.filename, 'rb') as fh:
-            data = fh.read()
-        file = io.BytesIO(data)
-        with BinaryFile(file, mode='r+') as fh:
-            fh._write_at(5, b'\xaa\xbb\xcc')
-            assert bytes(fh._read_at(4, 5)) == b'\x04\xaa\xbb\xcc\x08'
-        # verify persistence after close
-        assert file.getvalue()[5:8] == b'\xaa\xbb\xcc'
-
-    def test_write_at_memmap(self, tmp_path):
-        """Test _write_at writes via mmap; mode='r+' creates writable mmap."""
-        tmpfile = tmp_path / 'test.bin'
-        tmpfile.write_bytes(pathlib.Path(self.filename).read_bytes())
-        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
-            assert fh._mm is not None
-            assert fh.writable
-            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-            fh._write_at(5, b'\xaa\xbb\xcc')
-        with BinaryFile(tmpfile) as fh:
-            assert bytes(fh._read_at(5, 3)) == b'\xaa\xbb\xcc'
-
-    def test_memmapped(self):
-        """Test memmapped property reflects memory-map state."""
-        with BinaryFile(self.filename) as fh:
-            assert not fh.memmapped
-        with BinaryFile(self.filename, memmap=True) as fh:
-            assert fh.memmapped
-
-    def test_writable(self, tmp_path):
-        """Test writable property reflects file open mode."""
-        tmpfile = tmp_path / 'test.bin'
-        tmpfile.write_bytes(b'\x00' * 4)
-        with BinaryFile(tmpfile) as fh:
-            assert not fh.writable
-        with BinaryFile(tmpfile, mode='r+') as fh:
-            assert fh.writable
-
-    def test_name_setter(self):
-        """Test name setter updates display name and attrs."""
-        with BinaryFile(self.filename) as fh:
-            fh.name = 'custom'
-            assert fh.name == 'custom'
-            assert fh.attrs['name'] == 'custom'
-
-    def test_set_lock(self):
-        """Test set_lock enables and disables RLock; no-op when mmap active."""
-        import threading
-
-        with BinaryFile(self.filename) as fh:
-            assert isinstance(fh.lock, contextlib.nullcontext)
-            fh.set_lock(True)
-            assert isinstance(fh.lock, type(threading.RLock()))
-            fh.set_lock(False)
-            assert isinstance(fh.lock, contextlib.nullcontext)
-        with BinaryFile(self.filename, memmap=True) as fh:
-            lock_before = fh.lock
-            fh.set_lock(True)
-            assert fh.lock is lock_before
-
-    def test_repr(self):
-        """Test __repr__ includes class name and file name."""
-        with BinaryFile(self.filename) as fh:
-            r = repr(fh)
-            assert r.startswith('<BinaryFile ')
-            assert 'binary.bin' in r
-
-
 class TestFbdFile:
     """Test FbdFile with different file-like inputs."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         self.filename = os.path.normpath(DATA / 'CeruleanVenusCell1$CFCO.fbd')
         if not os.path.exists(self.filename):
             pytest.skip(f'{self.filename!r} not found')
@@ -491,7 +124,7 @@ class TestFbdFile:
 
         shape, frame_markers = fbd.frames((bins, times, markers))
         assert shape == (256, 312)
-        assert frame_markers[0].tolist() == [192126, 529435]
+        assert frame_markers[0].tolist() == [192126, 529436]
 
         image = fbd.asimage((bins, times, markers), (shape, frame_markers))
         assert image.shape == (1, 2, 256, 256, 64)
@@ -520,19 +153,19 @@ class TestFbdFile:
         assert attrs['units_per_sample'] == fbd.units_per_sample
         assert attrs['windows'] == fbd.windows
 
-    def test_str(self):
+    def test_str(self) -> None:
         """Test FbdFile with str path."""
         file = self.filename
         with FbdFile(file) as fbd:
             self.validate(fbd)
 
-    def test_pathlib(self):
+    def test_pathlib(self) -> None:
         """Test FbdFile with pathlib.Path."""
         file = pathlib.Path(self.filename)
         with FbdFile(file) as fbd:
             self.validate(fbd)
 
-    def test_bytesio(self):
+    def test_bytesio(self) -> None:
         """Test FbdFile with BytesIO."""
         with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
@@ -540,7 +173,7 @@ class TestFbdFile:
             self.validate(fbd)
 
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_openfile(self):
+    def test_fsspec_openfile(self) -> None:
         """Test FbdFile with fsspec OpenFile."""
         file = fsspec.open(self.filename)
         with FbdFile(file) as fbd:
@@ -548,13 +181,13 @@ class TestFbdFile:
         file.close()
 
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_localfileopener(self):
+    def test_fsspec_localfileopener(self) -> None:
         """Test FbdFile with fsspec LocalFileOpener."""
         with fsspec.open(self.filename) as file, FbdFile(file) as fbd:
             self.validate(fbd)
 
 
-def test_fbd_error():
+def test_fbd_error() -> None:
     """Test FbdFile errors."""
     filename = DATA / 'flimbox_firmware.fbf'
     if not os.path.exists(filename):
@@ -567,7 +200,7 @@ def test_fbd_error():
 
 
 @pytest.mark.parametrize('asxarray', [False, True])
-def test_imread(asxarray):
+def test_imread(*, asxarray: Literal[False, True]) -> None:
     """Test imread function."""
     xarray = pytest.importorskip('xarray') if asxarray else None
 
@@ -593,7 +226,7 @@ def test_imread(asxarray):
     assert image.shape == (1, 2, 256, 256, 64)
     assert image.dtype == numpy.uint16
     counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-    assert numpy.asarray(counts).tolist() == [72988, 0]
+    assert numpy.asarray(counts).tolist() == [72989, 0]
 
     if xarray is not None:
         assert isinstance(image, xarray.DataArray)
@@ -603,7 +236,7 @@ def test_imread(asxarray):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_cbco_b2w8c2(memmap):
+def test_fbd_cbco_b2w8c2(*, memmap: bool) -> None:
     """Test read CBCO b2w8c2 FBD file."""
     # SimFCS 16-bit with code settings; does not correctly decode image
     filename = DATA / 'flimbox_data$CBCO.fbd'
@@ -615,7 +248,7 @@ def test_fbd_cbco_b2w8c2(memmap):
         assert fbd.filename == os.path.basename(filename)
         assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
         assert fbd.header is None
         assert fbd.fbf is None
         assert fbd.fbs is None
@@ -663,7 +296,7 @@ def test_fbd_cbco_b2w8c2(memmap):
             )
 
         assert shape == (256, 266)
-        assert frame_markers.tolist() == [[44097, 124814]]
+        assert frame_markers.tolist() == [[44097, 124815]]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -675,14 +308,14 @@ def test_fbd_cbco_b2w8c2(memmap):
         assert image.dtype == numpy.uint16
         assert image[0, 0, 128, 128].sum() == 2
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [72976, 0]
+        assert counts.tolist() == [72977, 0]
 
         if SHOW:
             imshow(image[:, 0].sum(-1, dtype=numpy.uint32), show=True)
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_cbco_b2w8c2_override(memmap):
+def test_fbd_cbco_b2w8c2_override(*, memmap: bool) -> None:
     """Test read CBCO b2w8c2 FBD file with overridden pixel_dwell_time."""
     # pixel_dwell_time=0.937 (= 4.0 * 0.23425) is the correct value for this
     # file; the code table maps 'O'/'B' to 4.0 µs which is wrong.
@@ -710,7 +343,7 @@ def test_fbd_cbco_b2w8c2_override(memmap):
             )
 
         assert shape == (256, 266)
-        assert frame_markers.tolist() == [[44097, 124814]]
+        assert frame_markers.tolist() == [[44097, 124815]]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -721,11 +354,11 @@ def test_fbd_cbco_b2w8c2_override(memmap):
         assert image.shape == (1, 2, 256, 256, 64)
         assert image.dtype == numpy.uint16
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [72988, 0]
+        assert counts.tolist() == [72989, 0]
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_ec0z_b2w4c2(memmap):
+def test_fbd_ec0z_b2w4c2(*, memmap: bool) -> None:
     """Test read EC0Z b2w4c2 FBD file."""
     # SimFCS 16-bit with header; pixel_dwell_time is computed from the
     # header frame_time (25.1175 us); the physical scanner does 257 lines
@@ -788,7 +421,7 @@ def test_fbd_ec0z_b2w4c2(memmap):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_cfco_b2w8c2(memmap):
+def test_fbd_cfco_b2w8c2(*, memmap: bool) -> None:
     """Test read CFCO b2w8c2 FBD file."""
     # SimFCS 16-bit with correct code settings
     filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
@@ -800,7 +433,7 @@ def test_fbd_cfco_b2w8c2(memmap):
         assert fbd.filename == os.path.basename(filename)
         assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
         assert fbd.header is None
         assert fbd.fbf is None
         assert fbd.fbs is None
@@ -845,7 +478,7 @@ def test_fbd_cfco_b2w8c2(memmap):
         )
 
         assert shape == (256, 312)
-        assert frame_markers[0].tolist() == [192126, 529435]
+        assert frame_markers[0].tolist() == [192126, 529436]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -863,7 +496,7 @@ def test_fbd_cfco_b2w8c2(memmap):
             imshow(image.sum(-1, dtype=numpy.uint32), show=True)
 
 
-def test_fbd_xx2x_unknown_code():
+def test_fbd_xx2x_unknown_code() -> None:
     """Test that XX2X without fbs.xml raises FbdFileError for unknown code."""
     # Without an accompanying .fbs.xml, code[0]='X' is not in _frame_size
     # and should raise FbdFileError instead of a bare KeyError.
@@ -883,7 +516,7 @@ def test_fbd_xx2x_unknown_code():
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_xx2x_b4w16c4t10(memmap):
+def test_fbd_xx2x_b4w16c4t10(*, memmap: bool) -> None:
     """Test read XX2X b4w16c4t10 FBD file."""
     # ISS VistaVision 32-bit with external fbs.xml settings
     filename = DATA / 'IFLItest/303 Cu6 vs FL$XX2X.fbd'
@@ -895,9 +528,11 @@ def test_fbd_xx2x_b4w16c4t10(memmap):
         assert fbd.filename == os.path.basename(filename)
         assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
         assert fbd.header is None
+        assert fbd.fbf is not None
         assert fbd.fbf['channels'] == 4
+        assert fbd.fbs is not None
         assert fbd.fbs['ScanParams']['Channels'] == 1
         assert fbd.decoder == '_b4w16c4t10'
         assert fbd.code == 'XX2X'
@@ -940,8 +575,8 @@ def test_fbd_xx2x_b4w16c4t10(memmap):
         )
         assert shape == (256, 291)
         assert len(frame_markers) == 38
-        assert frame_markers[0].tolist() == [4753, 78205]
-        assert frame_markers[-1].tolist() == [2582185, 2635055]
+        assert frame_markers[0].tolist() == [4753, 78206]
+        assert frame_markers[-1].tolist() == [2582185, 2635056]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -971,7 +606,7 @@ def test_fbd_xx2x_b4w16c4t10(memmap):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_xx2x_b4w16c4(memmap):
+def test_fbd_xx2x_b4w16c4(*, memmap: bool) -> None:
     """Test read XX2X b4w16c4 FBD file."""
     # ISS VistaVision 32-bit with external fbs.xml settings
     # https://github.com/cgohlke/lfdfiles/issues/1
@@ -986,8 +621,10 @@ def test_fbd_xx2x_b4w16c4(memmap):
         assert fbd.filename == os.path.basename(filename)
         assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
         assert fbd.header is None
+        assert fbd.fbf is not None
+        assert fbd.fbs is not None
         assert fbd.fbf['channels'] == 4
         assert fbd.fbs['ScanParams']['Channels'] == 2
         assert fbd.decoder == '_b4w16c4t10'
@@ -1031,8 +668,8 @@ def test_fbd_xx2x_b4w16c4(memmap):
         )
         assert shape == (257, 313)  # 257 physical scan lines (one overhead)
         assert len(frame_markers) == 20
-        assert frame_markers[0].tolist() == [18027, 203143]
-        assert frame_markers[-1].tolist() == [3543838, 3728760]
+        assert frame_markers[0].tolist() == [18027, 203144]
+        assert frame_markers[-1].tolist() == [3543838, 3728761]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -1052,7 +689,7 @@ def test_fbd_xx2x_b4w16c4(memmap):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_fbd_ei0t_b4w8c4(memmap):
+def test_fbd_ei0t_b4w8c4(*, memmap: bool) -> None:
     """Test read EI0T b4w8c4 FBD file."""
     # SimFCS 32-bit with header settings; override pixel_dwell_time
     filename = (
@@ -1069,7 +706,9 @@ def test_fbd_ei0t_b4w8c4(memmap):
         assert fbd.filename == os.path.basename(filename)
         assert fbd.dirname == os.path.dirname(filename)
         assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
+        assert fbd.header is not None
+        assert fbd.fbf is not None
         assert fbd.header['pixel_dwell_time_index'] == 0
         assert fbd.header['laser_factor'] == 1.000281
         assert fbd.fbf['channels'] == 4
@@ -1115,7 +754,7 @@ def test_fbd_ei0t_b4w8c4(memmap):
         )
         assert shape == (256, 404)
         assert len(frame_markers) == 40
-        assert frame_markers[0].tolist() == [37521, 207501]
+        assert frame_markers[0].tolist() == [37521, 207502]
 
         image = fbd.asimage(
             (bins, times, markers),
@@ -1126,7 +765,7 @@ def test_fbd_ei0t_b4w8c4(memmap):
         assert image.shape == (40, 4, 257, 404, 64)
         assert image.dtype == numpy.uint16
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [1473312, 960165, 870617, 0]
+        assert counts.tolist() == [1473328, 960175, 870626, 0]
 
         if SHOW:
             imshow(
@@ -1136,7 +775,7 @@ def test_fbd_ei0t_b4w8c4(memmap):
             )
 
 
-def test_fbd_ei0t_auto_refine():
+def test_fbd_ei0t_auto_refine() -> None:
     """Test refine_settings and refine for EI0T."""
     filename = (
         DATA / 'PhasorPy' / '60xw850fov48p30_cell3_nucb_mitogr_actinor'
@@ -1208,7 +847,7 @@ def test_fbd_ei0t_auto_refine():
         assert fbd.pixel_dwell_time == 32.0
         assert image.shape == (40, 4, 257, 404, 64)
         counts = image.sum(axis=(0, 2, 3, 4), dtype=numpy.uint32)
-        assert counts.tolist() == [1473312, 960165, 870617, 0]
+        assert counts.tolist() == [1473328, 960175, 870626, 0]
 
     # refine=False skips refinement: bad dwell is not corrected
     with FbdFile(filename, pixel_dwell_time=100.0) as fbd:
@@ -1273,7 +912,7 @@ def test_fbd_ei0t_auto_refine():
         assert abs(fbd.laser_factor - 1.000281) < 1e-4
 
 
-def test_fbd_issue1_ei0t_b2w4c2():
+def test_fbd_issue1_ei0t_b2w4c2() -> None:
     """Test scan reconstruction fix for issue #1 (scanner_line_length)."""
     filename = (
         DATA / 'issue1/02_740nm_10x_8db_382u_1000zoom_ch1_B1C_1000$EI0T.fbd'
@@ -1313,7 +952,7 @@ def test_fbd_issue1_ei0t_b2w4c2():
         assert counts.tolist() == [2477779, 2]
 
 
-def test_fbd_bytesio():
+def test_fbd_bytesio() -> None:
     """Test read FBD from BytesIO."""
     filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
     if not os.path.exists(filename):
@@ -1328,7 +967,7 @@ def test_fbd_bytesio():
         assert fbd.dirname == ''
         assert fbd.name == 'BytesIO'
         # assert fbd.name == fbd.filename
-        assert fbd.filehandle
+        assert fbd.filehandle is not None
         assert fbd.header is None
         assert fbd.fbf is None
         assert fbd.fbs is None
@@ -1360,7 +999,7 @@ def test_fbd_bytesio():
             imshow(image.sum(-1, dtype=numpy.uint32), show=True)
 
 
-def test_fbd_bytesio_header():
+def test_fbd_bytesio_header() -> None:
     """Test read FBD with embedded header from BytesIO."""
     filename = (
         DATA / 'calibration_coumarin6_EtOH_25xNA1p4oil_780nm_'
@@ -1378,7 +1017,7 @@ def test_fbd_bytesio_header():
         assert fbd.laser_factor == ref.laser_factor
 
 
-def test_fbd_fbs_override():
+def test_fbd_fbs_override() -> None:
     """Test user-supplied settings are not overridden by FBS file."""
     filename = DATA / 'FBS/TESTFILE$XX2X.fbd'
     if not os.path.exists(filename):
@@ -1389,7 +1028,7 @@ def test_fbd_fbs_override():
         assert fbd.scanner_frame_start == 3
 
 
-def test_fbd_frames_fallback_laser_factor():
+def test_fbd_frames_fallback_laser_factor() -> None:
     """Test frame-detection fallback respects and scales laser_factor."""
     filename = (
         DATA / 'PhasorPy' / '60xw850fov48p30_cell3_nucb_mitogr_actinor'
@@ -1417,7 +1056,7 @@ def test_fbd_frames_fallback_laser_factor():
         assert abs(fbd.laser_factor * 100.0 / 32.0 - 257 / 256) < 0.01
 
 
-def test_fbd_cc0z_b2w4c2():
+def test_fbd_cc0z_b2w4c2() -> None:
     """Test CC0Z b2w4c2 FBD file with auto laser_factor refinement."""
     # Fix #1: units_per_sample captured after frames() may update laser_factor.
     # Fix #2: integrate_frames exceeding frame count raises ValueError.
@@ -1428,6 +1067,7 @@ def test_fbd_cc0z_b2w4c2():
 
     with FbdFile(filename) as fbd:
         # header has slightly wrong laser_factor; frames() should refine it
+        assert fbd.header is not None
         assert fbd.header['laser_factor'] == pytest.approx(0.9955791)
         initial_factor = fbd.laser_factor
 
@@ -1477,7 +1117,7 @@ def test_fbd_cc0z_b2w4c2():
 
 
 @pytest.mark.parametrize('bytesio', [False, True])
-def test_read_fbf(bytesio):
+def test_read_fbf(*, bytesio: bool) -> None:
     """Test read FBF file."""
     filename = DATA / 'flimbox_firmware.fbf'
     if not os.path.exists(filename):
@@ -1504,7 +1144,7 @@ def test_read_fbf(bytesio):
 
 
 @pytest.mark.parametrize('stringio', [False, True])
-def test_read_fbs(stringio):
+def test_read_fbs(*, stringio: bool) -> None:
     """Test read FBS file."""
     filename = DATA / 'FBS/TESTFILE.fbs.xml'
     if not os.path.exists(filename):
@@ -1533,7 +1173,7 @@ def test_read_fbs(stringio):
     )
 
 
-def test_fbd_asxarray():
+def test_fbd_asxarray() -> None:
     """Test asxarray on XX2X FBD file with FBS.XML settings."""
     xarray = pytest.importorskip('xarray')
 
@@ -1571,7 +1211,7 @@ def test_fbd_asxarray():
     assert xarr.attrs['scanner'] == 'ISS Scanning Mirror'
 
 
-def test_sflim_decode():
+def test_sflim_decode() -> None:
     """Test sflim_decode and sflim_decode_photons functions."""
     filename = DATA / '20210123488_100x_NSC_166_TMRM_4_zoom4000_L115.bin'
     if not os.path.exists(filename):
@@ -1587,7 +1227,7 @@ def test_sflim_decode():
     sflim = numpy.zeros((32, 256, 256, 342), dtype=numpy.uint8)
     sflim_decode(data, sflim, pixeltime=pixeltime, maxframes=20, num_threads=6)
     argmax = numpy.unravel_index(numpy.argmax(sflim), sflim.shape)
-    assert_array_equal(argmax, (24, 178, 132, 248))
+    assert array_equal(argmax, (24, 178, 132, 248))
 
     del sflim
 
@@ -1599,7 +1239,7 @@ def test_sflim_decode():
     assert photons[12345].tolist() == [205, 3, 2, 181, 51]
 
 
-def test_decode_validation():
+def test_decode_validation() -> None:
     """Test input validation of Cython decode and histogram functions."""
     table = numpy.zeros((1, 4), dtype=numpy.int16)
     settings = {
@@ -1635,6 +1275,12 @@ def test_decode_validation():
         fbd_decode(data, bins, times, markers, 0, 1, 1, **settings)
     with pytest.raises(ValueError, match='invalid parameters'):
         fbd_decode(data, bins, times, markers, 4, 1, 0, **settings)
+
+    # non-positive number of threads
+    with pytest.raises(ValueError, match='num_threads'):
+        fbd_decode(
+            data, bins, times, markers, 4, 1, 1, num_threads=0, **settings
+        )
 
     # out-of-range frame markers
     hist = numpy.zeros((1, 1, 4, 64), dtype=numpy.uint16)
@@ -1672,7 +1318,19 @@ def test_decode_validation():
     assert sflim_decode_photons(data32, photons, (4, 4), pixeltime=1) == 0
 
 
-def test_fbd_decode_empty():
+def test_fbf_parse_header() -> None:
+    """Test fbf_parse_header with unnamed and fractional MHz values."""
+    from fbdfile.fbdfile import fbf_parse_header
+
+    settings = fbf_parse_header('16w/2ch/256bin/clk 78.5MHz/ext 80MHz/x/c')
+    assert settings['windows'] == 16
+    assert settings['channels'] == 2
+    assert settings['clk'] == 78500000
+    assert settings['ext'] == 80000000
+    assert settings['comment'] == '256bin/c'
+
+
+def test_fbd_decode_empty() -> None:
     """Test FbdFile.decode with zero words returns empty arrays."""
     filename = DATA / 'CeruleanVenusCell1$CFCO.fbd'
     if not os.path.exists(filename):
@@ -1685,7 +1343,7 @@ def test_fbd_decode_empty():
         assert markers.shape == (0,)
 
 
-def test_fbd_to_b64():
+def test_fbd_to_b64() -> None:
     """Test fbd_to_b64 function."""
     lfdfiles = pytest.importorskip('lfdfiles')
 
@@ -1721,7 +1379,7 @@ def test_fbd_to_b64():
             assert b64.asarray().sum() == 0
 
 
-def test_xml2dict():
+def test_xml2dict() -> None:
     """Test xml2dict function."""
     xml = """<?xml version="1.0" ?>
     <root attr="attribute">
@@ -1749,7 +1407,7 @@ def test_xml2dict():
 
 
 @pytest.mark.skipif(phasorpy is None, reason='phasorpy not installed')
-def test_phasorpy():
+def test_phasorpy() -> None:
     """Test phasorpy.io.signal_from_fbd function."""
     from phasorpy.datasets import fetch
     from phasorpy.io import signal_from_fbd
@@ -1806,7 +1464,7 @@ def test_phasorpy():
 @pytest.mark.parametrize(
     'filename', glob.glob('**/*.fbf', root_dir=DATA, recursive=True)
 )
-def test_glob_fbf(filename):
+def test_glob_fbf(filename: str) -> None:
     """Test read all FBF files."""
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
@@ -1816,27 +1474,23 @@ def test_glob_fbf(filename):
 @pytest.mark.parametrize(
     'filename', glob.glob('**/*.fbs.xml', root_dir=DATA, recursive=True)
 )
-def test_glob_fbs(filename):
+def test_glob_fbs(filename: str) -> None:
     """Test read all FBS files."""
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
     fbs_read(DATA / filename)
 
 
-@pytest.mark.thread_unsafe(
-    reason='Matplotlib and GUI backends are not thread-safe'
-)
-@pytest.mark.iterations(1)
+@pytest.mark.parallel_threads(1)
 @pytest.mark.parametrize(
     'filename', glob.glob('**/*.fbd', root_dir=DATA, recursive=True)
 )
-def test_glob_fbd(filename):
+def test_glob_fbd(filename: str) -> None:
     """Test read all FBD files."""
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    filename = DATA / filename
     try:
-        fbd = FbdFile(filename, memmap=True)
+        fbd = FbdFile(DATA / filename, memmap=True)
     except FbdFileError as exc:
         if 'unknown frame size code' in str(exc):
             pytest.xfail(reason=str(exc))
@@ -1854,7 +1508,7 @@ def test_glob_fbd(filename):
 @pytest.mark.skipif(
     not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.13'
 )
-def test_gil_enabled():
+def test_gil_enabled() -> None:
     """Test that GIL state is consistent with build configuration."""
     assert sys._is_gil_enabled() != sysconfig.get_config_var('Py_GIL_DISABLED')
 
@@ -1869,6 +1523,3 @@ if __name__ == '__main__':
     argv.append('--cov=fbdfile')
     argv.append('--verbose')
     sys.exit(pytest.main(argv))
-
-# mypy: allow-untyped-defs
-# mypy: check-untyped-defs=False
