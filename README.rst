@@ -12,7 +12,7 @@ The files are written by SimFCS and ISS VistaVision software.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.16
+:Version: 2026.11.5
 :DOI: `10.5281/zenodo.17136073 <https://doi.org/10.5281/zenodo.17136073>`_
 
 Quickstart
@@ -35,17 +35,32 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (optional)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.10.15 (optional)
 - `Click <https://pypi.python.org/pypi/click>`_ 8.5.0
   (optional, for command line apps)
-- `Cython <https://pypi.org/project/cython/>`_ 3.2.9 (build)
+- `Cython <https://pypi.org/project/cython/>`_ 3.3.1 (build)
 
 Revisions
 ---------
+
+2026.11.5
+
+- Fix histogram including samples before scanner_frame_start in first pixel.
+- Fix frames excluding last data word of each frame (breaking).
+- Fix histogram dropping last bin if pdiv does not divide pmax.
+- Fix parsing FBF headers with unnamed or fractional MHz values.
+- Fix BinaryFile._read_into on partial reads.
+- Fix sflim_decode return value and saturate counts.
+- Fix FbdFile.decode silently ignoring unknown arguments (breaking).
+- Fix decoder_settings not updating when decoder changes.
+- Fall back to defaults for invalid laser frequency and factor in header.
+- Validate indices in FBD header.
+- Add FBDFILE_NUM_THREADS environment variable.
+- Parallelize fbd_decode over data words instead of channels.
 
 2026.10.16
 
